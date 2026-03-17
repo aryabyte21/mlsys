@@ -60,13 +60,15 @@ def serve():
     logging.basicConfig(level=logging.INFO)
     sys.path.insert(0, "/root")
 
-    # L4 GPU config — no FP8 initially, safe baseline
+    # L4 GPU config — no FP8, no spec decode (L4 safe baseline)
     os.environ["QUANTIZATION"] = ""
     os.environ["KV_CACHE_DTYPE"] = ""
     os.environ["GPU_MEMORY_UTILIZATION"] = "0.90"
     os.environ["MAX_NUM_SEQS"] = "128"
+    os.environ["MAX_NUM_BATCHED_TOKENS"] = "8192"
     os.environ["ENABLE_CHUNKED_PREFILL"] = "true"
     os.environ["ENABLE_PREFIX_CACHING"] = "true"
+    os.environ["SPEC_DECODE_ENABLED"] = "false"
 
     from app.main import app as fastapi_app
 

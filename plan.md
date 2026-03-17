@@ -1,6 +1,6 @@
 # Optimization Plan
 
-> Last updated: 2026-03-17
+> Last updated: 2026-03-18
 
 ## Current Goal
 
@@ -13,9 +13,12 @@ The biggest performance gains will come from (in order):
 1. **FP8 quantization** — halves model memory, freeing VRAM for more concurrent KV caches
 2. **FP8 KV cache** — halves KV cache memory, critical for 128 concurrency
 3. **Reduced max_model_len** — inputs are 6-92 chars, outputs max 256 tokens → 1024 is plenty
-4. **Exact-match response cache** — 36.1% of training queries are duplicates; temperature=0 makes caching lossless
-5. **APC + chunked prefill** — built-in vLLM features for prefix sharing and P99 reduction
-6. **Disabling Qwen3 thinking mode** — prevents wasted tokens on `<think>` blocks
+4. **Exact-match response cache + inflight dedup** — 36.1% duplicates; dedup coalesces concurrent identical requests
+5. **N-gram speculative decoding** — 3 draft tokens per step, formulaic responses have high acceptance rate
+6. **max_num_batched_tokens=8192** — default 2048 is under-tuned for high-concurrency decode
+7. **APC + chunked prefill** — built-in vLLM features for prefix sharing and P99 reduction
+8. **Disabling Qwen3 thinking mode** — prevents wasted tokens on `<think>` blocks
+9. **V1 engine + CUDA graphs** — async scheduling + 8x throughput over eager mode on Blackwell
 
 ## Key Data Insights
 
@@ -32,57 +35,70 @@ The biggest performance gains will come from (in order):
 Incoming Request (conc. 128)
     │
     ▼
-┌─────────────────┐
-│  Exact-Match     │──cache hit──▶ Return cached response + logprobs
-│  Response Cache  │
-└────────┬────────┘
-         │ cache miss
-         ▼
+┌──────────────────────┐
+│  Exact-Match Cache    │──hit──▶ Return instantly (0ms)
+└──────────┬───────────┘
+           │ miss
+           ▼
+┌──────────────────────┐
+│  Inflight Dedup       │──dup──▶ Await first result (no GPU cost)
+└──────────┬───────────┘
+           │ first
+           ▼
 ┌─────────────────────────────────────────────────┐
-│  vLLM AsyncLLMEngine                             │
+│  vLLM V1 AsyncLLMEngine (Blackwell-optimized)    │
 │  ┌────────────────────────────────────────────┐  │
 │  │ Model: Qwen3-4B-Instruct-2507 (FP8)       │  │
 │  │ KV Cache: FP8, max_model_len=1024          │  │
 │  │ Attention: FlashInfer                       │  │
+│  │ Speculative: n-gram (3 tokens, lookup 2-4)  │  │
 │  │ APC: enabled (shared prefix caching)        │  │
 │  │ Chunked Prefill: enabled (P99 reduction)    │  │
 │  │ max_num_seqs: 256                           │  │
+│  │ max_num_batched_tokens: 8192                │  │
 │  │ gpu_memory_utilization: 0.95                │  │
+│  │ CUDA graphs: enabled (8x over eager)        │  │
 │  └────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────┘
          │
          ▼
-    Return response + logprobs (cache the result)
+    Cache result, resolve dedup waiters
 ```
 
-## Optimizations Implemented
+## Full Optimization Stack
 
-### Tier 1 — High Impact, Low Risk
+### Tier 1 — High Impact
 
-| # | Optimization | Mechanism | Expected Impact |
-|---|-------------|-----------|----------------|
-| 1 | FP8 model quantization | `quantization="fp8"` | 2x model memory reduction → more KV cache room |
-| 2 | FP8 KV cache | `kv_cache_dtype="fp8"` | 2x KV cache memory reduction → 128+ concurrent seqs |
-| 3 | Reduced max_model_len | `max_model_len=1024` (from 8192) | 8x less KV cache per seq → fits more concurrent seqs |
-| 4 | Exact-match response cache | App-layer SHA256 cache | ~36% requests skip inference entirely |
-| 5 | Disable Qwen3 thinking | `enable_thinking=False` in chat template | Prevents wasted tokens on `<think>` blocks |
+| # | Optimization | Mechanism | Status |
+|---|-------------|-----------|--------|
+| 1 | FP8 model quantization | `quantization="fp8"` | Done |
+| 2 | FP8 KV cache | `kv_cache_dtype="fp8"` | Done |
+| 3 | Reduced max_model_len | `max_model_len=1024` (from 8192) | Done |
+| 4 | Exact-match response cache | SHA256 LRU cache, 36% hit rate | Done |
+| 5 | Inflight request dedup | asyncio futures coalesce concurrent identical requests | Done |
+| 6 | N-gram speculative decoding | 3 tokens, lookup 2-4, disable_logprobs=False | Done |
+| 7 | Disable Qwen3 thinking | `enable_thinking=False` in chat template | Done |
 
-### Tier 2 — Medium Impact, Low Risk
+### Tier 2 — Medium Impact
 
-| # | Optimization | Mechanism | Expected Impact |
-|---|-------------|-----------|----------------|
-| 6 | Automatic Prefix Caching | `enable_prefix_caching=True` | Reuses KV blocks for shared system prompt prefix |
-| 7 | Chunked prefill | `enable_chunked_prefill=True` | Interleaves prefill/decode → reduces P99 latency |
-| 8 | GPU memory utilization | `gpu_memory_utilization=0.95` (from 0.9) | 5% more VRAM for KV cache |
-| 9 | Batch size tuning | `max_num_seqs=256` | Allows efficient batching of 128+ concurrent requests |
+| # | Optimization | Mechanism | Status |
+|---|-------------|-----------|--------|
+| 8 | max_num_batched_tokens=8192 | Up from 2048 default, reduces scheduling overhead | Done |
+| 9 | V1 engine | `VLLM_USE_V1=1`, async scheduling, overlapped CPU/GPU | Done |
+| 10 | CUDA graphs | Default (not enforce_eager), 8x throughput on Blackwell | Done |
+| 11 | Automatic Prefix Caching | `enable_prefix_caching=True` | Done |
+| 12 | Chunked prefill | `enable_chunked_prefill=True` | Done |
+| 13 | GPU memory utilization | `gpu_memory_utilization=0.95` (from 0.9) | Done |
+| 14 | Batch size tuning | `max_num_seqs=256` | Done |
+| 15 | CUDA memory defrag | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Done |
 
-### Tier 3 — Exploration (Saved for Later)
+### Tier 3 — Fine-Tuning (After Benchmark)
 
 | # | Optimization | Notes |
 |---|-------------|-------|
-| 10 | Speculative decoding (n-gram) | No extra model; may help decode speed for formulaic responses |
-| 11 | max_num_batched_tokens tuning | Controls prefill chunk size, affects throughput/latency tradeoff |
-| 12 | Swap space tuning | More CPU swap for KV cache overflow |
+| 16 | max_model_len reduction to 512 | If 1024 is overkill, halves KV per seq |
+| 17 | spec_num_tokens tuning (2 vs 3 vs 5) | Measure acceptance rate, find sweet spot |
+| 18 | gpu_memory_utilization=0.98 | Push VRAM harder if no OOM |
 
 ### Deprioritized
 
@@ -90,49 +106,60 @@ Incoming Request (conc. 128)
 |---|-------------|--------|
 | - | Semantic/fuzzy cache | Risk of incorrect logprobs → perplexity degradation |
 | - | Session-aware scheduler | Benchmark is single-turn, no sessions to track |
-| - | Session-TTL KV eviction | No sessions in the benchmark |
-| - | CPU KV cache offload | Adds latency, complex implementation |
+| - | CPU KV cache offload | V1 engine uses recomputation, not CPU swap |
+| - | enforce_eager | Loses 8x throughput on Blackwell due to no CUDA graphs |
+| - | num_scheduler_steps | V0-only, incompatible with spec decode, V1 does it natively |
 
 ## Experiment Log
 
 | # | Date | Config Change | P50 (ms) | P99 (ms) | Throughput (req/s) | Perplexity | Verdict |
 |---|------|--------------|----------|----------|-------------------|------------|---------|
 | 0 | — | baseline (starter kit, no opts) | — | — | — | — | pending |
-| 1 | 2026-03-17 | Tier 1+2 on Modal L4 (no FP8, max_model_len=1024, cache+dedup, prefix_caching, chunked_prefill) | 9859 | 19053 | 13.33 | 1.2000 | baseline on L4 — 6 failures, high latency due to network + L4 vs RTX 5080 |
+| 1 | 2026-03-17 | Tier 1+2 on Modal L4 (no FP8, no spec) | 9859 | 19053 | 13.33 | 1.2000 | L4 baseline — high latency from network + weak GPU |
+| 2 | — | Full stack on RTX 5080 (FP8 + spec decode + V1) | — | — | — | — | pending |
 
 ## Discoveries & Surprises
 
 - **36.1% duplicate rate** in training data — exact-match caching is extremely high impact
-- **Benchmark is single-turn** (not multi-turn) — session-based optimizations from proposal are irrelevant
+- **Benchmark is single-turn** (not multi-turn) — session-based optimizations irrelevant
 - **Benchmark uses P99** (code) not P95 (spec doc) — target P99 reduction
 - **temperature=0 always** — makes caching lossless (deterministic outputs)
 - **max_tokens=256** is set by benchmark, not configurable from engine side
+- **vLLM spec decode disable_logprobs defaults to True** — MUST set False or logprobs silently missing
+- **V1 engine doesn't use CPU swap** — uses recomputation-based preemption instead
+- **CUDA graphs give 8x throughput over enforce_eager on Blackwell** (from vLLM benchmarks)
+- **max_num_batched_tokens default (2048) is under-tuned** — vLLM source has TODO to tune it
+- **transformers>=4.53.0 breaks vLLM tokenizer** — all_special_tokens_extended removed, must pin
 
 ## Key Techniques & Skills
 
 - FP8 quantization on RTX 5080 (Blackwell) for inference memory savings
 - FlashInfer attention backend for CUDA 12.8 compatibility
-- Application-layer response caching with SHA256 keys
-- vLLM AsyncEngineArgs tuning for high-concurrency serving
+- Application-layer response caching with SHA256 keys + inflight dedup
+- N-gram speculative decoding for formulaic customer service responses
+- vLLM V1 engine with async scheduling and CUDA graphs
+- PYTORCH_CUDA_ALLOC_CONF for memory defragmentation
 
 ## Decisions
 
 - **FP8 over INT4/AWQ**: FP8 has minimal quality loss and native hardware support on RTX 5080
-- **max_model_len=1024**: Conservative but safe; can reduce to 512 if memory is tight
-- **Skip semantic cache**: Too risky for perplexity; exact-match already covers 36% of requests
-- **Skip session-aware scheduling**: No sessions in the actual benchmark
+- **max_model_len=1024**: Conservative but safe; max prompt+response is ~350 tokens
+- **N-gram spec decode over Eagle/draft model**: No extra model needed, works in V1, low risk
+- **3 speculative tokens**: Balance between acceptance rate and overhead for short prompts
+- **disable_logprobs=False**: Critical — default True silently drops logprobs
+- **Pin vllm==0.8.5.post1 + transformers<4.53.0**: Latest versions have breaking changes
 
 ## Dead Ends
 
 - Session-aware scheduler — benchmark has no multi-turn sessions
 - Session-TTL KV eviction — same reason
 - Semantic/fuzzy caching — risks perplexity degradation for uncertain hit rate improvement
+- enforce_eager — loses 8x throughput on Blackwell
+- num_scheduler_steps — V0-only, V1 already does async scheduling natively
 
 ## Next Steps
 
-1. ~~Deploy on Modal (L4 GPU) and test that the engine starts and serves requests~~ DONE
-2. Run benchmark against Modal deployment to get initial numbers
-3. Deploy on Vast.ai RTX 5080 with Docker image for final benchmarking
-4. Tune parameters if needed (max_model_len, max_num_seqs, gpu_memory_utilization)
-5. Try speculative decoding (n-gram) if decode is the bottleneck
-6. Final Docker image push to GHCR for submission
+1. Deploy on Vast.ai RTX 5080 with Docker image and run benchmark
+2. If spec decode causes issues with logprobs, disable it via `SPEC_DECODE_ENABLED=false`
+3. Fine-tune: try max_model_len=512, spec_num_tokens=5, gpu_mem=0.98
+4. Final Docker image push to GHCR for submission
