@@ -31,13 +31,27 @@ async def chat_completions(request: ChatRequest):
     if not engine.is_ready:
         raise HTTPException(status_code=503, detail="Engine is still initializing")
 
+    # Layer 1: persistent cache hit
     cached = cache.get(request.messages, request.temperature, request.max_tokens)
     if cached is not None:
         return cached
 
-    response = await engine.generate(request)
-    cache.put(request.messages, request.temperature, request.max_tokens, response)
-    return response
+    # Layer 2: another coroutine is already computing this exact request — wait for it
+    inflight = cache.get_inflight(request.messages, request.temperature, request.max_tokens)
+    if inflight is not None:
+        return await inflight
+
+    # Layer 3: we're the first — register inflight, run inference, resolve waiters
+    future = cache.start_inflight(request.messages, request.temperature, request.max_tokens)
+    try:
+        response = await engine.generate(request)
+        cache.complete_inflight(
+            request.messages, request.temperature, request.max_tokens, response
+        )
+        return response
+    except Exception as e:
+        cache.fail_inflight(request.messages, request.temperature, request.max_tokens, e)
+        raise
 
 
 @app.get("/health")
