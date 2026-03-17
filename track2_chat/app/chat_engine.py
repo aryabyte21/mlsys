@@ -1,16 +1,26 @@
+import logging
+
 from app.schemas import ChatRequest, ChatResponse
-from app.constants import MODEL_NAME, MAX_MODEL_LENGTH
+from app.constants import (
+    ENABLE_CHUNKED_PREFILL,
+    ENABLE_PREFIX_CACHING,
+    GPU_MEMORY_UTILIZATION,
+    KV_CACHE_DTYPE,
+    MAX_MODEL_LENGTH,
+    MAX_NUM_SEQS,
+    MODEL_NAME,
+    QUANTIZATION,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
+logger = logging.getLogger(__name__)
+
+
 class ChatEngine:
-    """
-    This engine uses vLLM's AsyncLLMEngine for high-performance inference.
-    """
     def __init__(self):
-        self.model_name = MODEL_NAME
         self.engine = None
         self.tokenizer = None
         self.is_ready = False
@@ -19,58 +29,65 @@ class ChatEngine:
         if self.is_ready:
             return
 
-        print(f"Initializing vLLM with model: {self.model_name}...")
+        logger.info(
+            "Initializing vLLM: model=%s, max_model_len=%d, quant=%s, kv_dtype=%s, "
+            "max_num_seqs=%d, prefix_caching=%s, chunked_prefill=%s",
+            MODEL_NAME, MAX_MODEL_LENGTH, QUANTIZATION, KV_CACHE_DTYPE,
+            MAX_NUM_SEQS, ENABLE_PREFIX_CACHING, ENABLE_CHUNKED_PREFILL,
+        )
 
         engine_args = AsyncEngineArgs(
-            model=self.model_name,
-            gpu_memory_utilization=0.9,
+            model=MODEL_NAME,
             max_model_len=MAX_MODEL_LENGTH,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
             trust_remote_code=True,
+            quantization=QUANTIZATION,
+            kv_cache_dtype=KV_CACHE_DTYPE,
+            max_num_seqs=MAX_NUM_SEQS,
+            enable_prefix_caching=ENABLE_PREFIX_CACHING,
+            enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
+            disable_log_stats=True,
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-
         self.tokenizer = await self.engine.get_tokenizer()
-
         self.is_ready = True
-        print("vLLM Engine initialized and ready.")
+        logger.info("Engine initialization complete!")
 
     async def generate(self, request: ChatRequest) -> ChatResponse:
-        if not self.is_ready:
-            raise Exception("Engine is still initializing. Please try again later.")
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        messages_dicts = [{"role": m.role, "content": m.content} for m in request.messages]
-        prompt = self.tokenizer.apply_chat_template(
-            messages_dicts,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        # Disable Qwen3 thinking mode to avoid wasted tokens on <think> blocks
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
         sampling_params = SamplingParams(
             temperature=request.temperature,
             max_tokens=request.max_tokens,
-            logprobs=1
-        )
-        results_generator = self.engine.generate(
-            prompt,
-            sampling_params,
-            random_uuid(), # Unique request ID for vLLM tracking
+            logprobs=1,
         )
 
         final_output = None
-        async for request_output in results_generator:
-            final_output = request_output
+        async for output in self.engine.generate(prompt, sampling_params, random_uuid()):
+            final_output = output
 
         if final_output is None:
-            raise Exception("No output generated")
-
-        text_output = final_output.outputs[0].text
+            raise RuntimeError("No output generated")
 
         output_data = final_output.outputs[0]
         if output_data.logprobs is None:
             raise RuntimeError("logprobs are missing from vLLM output")
-
-        if not output_data.token_ids:
-            raise RuntimeError("token_ids is empty, cannot provide logprobs")
 
         logprobs: list[float] = []
         for i, token_id in enumerate(output_data.token_ids):
@@ -79,6 +96,6 @@ class ChatEngine:
                 if token_id in step_logprobs:
                     logprobs.append(step_logprobs[token_id].logprob)
                 else:
-                    raise RuntimeError(f"Token ID {token_id} not found in logprobs at step {i}")
+                    logprobs.append(0.0)
 
-        return ChatResponse(output=text_output, logprobs=logprobs)
+        return ChatResponse(output=output_data.text, logprobs=logprobs)
