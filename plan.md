@@ -130,7 +130,7 @@ Incoming Request (conc. 128)
 
 ## Next Steps
 
-1. Deploy on Modal (L4 GPU) and test that the engine starts and serves requests
+1. ~~Deploy on Modal (L4 GPU) and test that the engine starts and serves requests~~ DONE
 2. Run benchmark against Modal deployment to get initial numbers
 3. Deploy on Vast.ai RTX 5080 with Docker image for final benchmarking
 4. Tune parameters if needed (max_model_len, max_num_seqs, gpu_memory_utilization)
