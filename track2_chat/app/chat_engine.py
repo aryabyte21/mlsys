@@ -7,9 +7,14 @@ from app.constants import (
     GPU_MEMORY_UTILIZATION,
     KV_CACHE_DTYPE,
     MAX_MODEL_LENGTH,
+    MAX_NUM_BATCHED_TOKENS,
     MAX_NUM_SEQS,
     MODEL_NAME,
     QUANTIZATION,
+    SPEC_DECODE_ENABLED,
+    SPEC_NUM_TOKENS,
+    SPEC_PROMPT_LOOKUP_MAX,
+    SPEC_PROMPT_LOOKUP_MIN,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -29,11 +34,23 @@ class ChatEngine:
         if self.is_ready:
             return
 
+        speculative_config = None
+        if SPEC_DECODE_ENABLED:
+            speculative_config = {
+                "method": "ngram",
+                "prompt_lookup_min": SPEC_PROMPT_LOOKUP_MIN,
+                "prompt_lookup_max": SPEC_PROMPT_LOOKUP_MAX,
+                "num_speculative_tokens": SPEC_NUM_TOKENS,
+                "disable_logprobs": False,
+            }
+
         logger.info(
             "Initializing vLLM: model=%s, max_model_len=%d, quant=%s, kv_dtype=%s, "
-            "max_num_seqs=%d, prefix_caching=%s, chunked_prefill=%s",
+            "max_num_seqs=%d, max_batched_tokens=%d, prefix_caching=%s, "
+            "chunked_prefill=%s, spec_decode=%s",
             MODEL_NAME, MAX_MODEL_LENGTH, QUANTIZATION, KV_CACHE_DTYPE,
-            MAX_NUM_SEQS, ENABLE_PREFIX_CACHING, ENABLE_CHUNKED_PREFILL,
+            MAX_NUM_SEQS, MAX_NUM_BATCHED_TOKENS, ENABLE_PREFIX_CACHING,
+            ENABLE_CHUNKED_PREFILL, speculative_config,
         )
 
         engine_args = AsyncEngineArgs(
@@ -44,9 +61,11 @@ class ChatEngine:
             quantization=QUANTIZATION,
             kv_cache_dtype=KV_CACHE_DTYPE,
             max_num_seqs=MAX_NUM_SEQS,
+            max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
+            speculative_config=speculative_config,
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
