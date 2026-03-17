@@ -98,7 +98,7 @@ Incoming Request (conc. 128)
 | # | Date | Config Change | P50 (ms) | P99 (ms) | Throughput (req/s) | Perplexity | Verdict |
 |---|------|--------------|----------|----------|-------------------|------------|---------|
 | 0 | — | baseline (starter kit, no opts) | — | — | — | — | pending |
-| 1 | — | full optimized build (all Tier 1+2) | — | — | — | — | pending |
+| 1 | 2026-03-17 | Tier 1+2 on Modal L4 (no FP8, max_model_len=1024, cache+dedup, prefix_caching, chunked_prefill) | 9859 | 19053 | 13.33 | 1.2000 | baseline on L4 — 6 failures, high latency due to network + L4 vs RTX 5080 |
 
 ## Discoveries & Surprises
 
