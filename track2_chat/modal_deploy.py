@@ -16,7 +16,7 @@ MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        "vllm",
+        "vllm==0.8.5.post1",
         "fastapi[standard]",
         "pydantic",
         "huggingface_hub[hf_xet]",
