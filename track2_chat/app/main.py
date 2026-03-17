@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,11 +16,17 @@ engine = ChatEngine()
 cache = ResponseCache(max_size=CACHE_MAX_SIZE)
 
 
+async def _init_engine():
+    try:
+        await engine.initialize()
+    except Exception:
+        logger.exception("Engine initialization FAILED!")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting engine initialization...")
-    await engine.initialize()
-    logger.info("Engine ready, accepting requests.")
+    logger.info("Starting engine initialization in background...")
+    asyncio.create_task(_init_engine())
     yield
 
 
