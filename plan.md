@@ -116,7 +116,11 @@ Incoming Request (conc. 128)
 |---|------|--------------|----------|----------|-------------------|------------|---------|
 | 0 | — | baseline (starter kit, no opts) | — | — | — | — | pending |
 | 1 | 2026-03-17 | Tier 1+2 on Modal L4 (no FP8, no spec) | 9859 | 19053 | 13.33 | 1.2000 | L4 baseline — high latency from network + weak GPU |
-| 2 | — | Full stack on RTX 5080 (FP8 + spec decode + V1) | — | — | — | — | pending |
+| 2 | 2026-03-21 | Vanilla baseline on H200 (no FP8, no V1, no spec, no FlashInfer) | 1219 | 2767 | 108.40 | 1.2001 | working baseline — all 13435 passed |
+| 3 | 2026-03-21 | V1 engine only on H200 | 1226 | 2663 | 109.48 | 1.2001 | works, marginal improvement |
+| 4 | 2026-03-21 | V1 + FP8 on H200 | 1140 | 2579 | 116.11 | 1.2009 | works, ~6% throughput gain |
+| 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
+| 6 | — | Full stack on RTX 5080 (Docker) | — | — | — | — | pending |
 
 ## Discoveries & Surprises
 
@@ -127,6 +131,11 @@ Incoming Request (conc. 128)
 - **max_tokens=256** is set by benchmark, not configurable from engine side
 - **vLLM spec decode disable_logprobs defaults to True** — MUST set False or logprobs silently missing
 - **V1 engine doesn't use CPU swap** — uses recomputation-based preemption instead
+- **V1 engine + FP8 KV cache incompatible** in vLLM 0.8.5.post1 — `VLLM_USE_V1=1` raises NotImplementedError with `--kv-cache-dtype`
+- **ngram spec decode on V1 is experimental** — causes EngineDeadError crashes under load
+- **Eval uses P50 and P95** (not P99) per project spec, though benchmark script reports P99
+- **FlashInfer + FP8 + V1 crashes** — EngineDeadError under load. FlashInfer FP8 attention with scale 1.0 causes engine core death
+- **V1 + FP8 (no FlashInfer) is stable** — confirmed 116 req/s on H200, all 13435 passed, perplexity 1.2009
 - **CUDA graphs give 8x throughput over enforce_eager on Blackwell** (from vLLM benchmarks)
 - **max_num_batched_tokens default (2048) is under-tuned** — vLLM source has TODO to tune it
 - **transformers>=4.53.0 breaks vLLM tokenizer** — all_special_tokens_extended removed, must pin

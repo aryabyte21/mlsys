@@ -3,11 +3,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import ORJSONResponse
 
 from app.cache import ResponseCache
 from app.chat_engine import ChatEngine
 from app.constants import CACHE_MAX_SIZE
-from app.schemas import ChatRequest, ChatResponse
+from app.schemas import ChatMessage, ChatRequest, ChatResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +20,15 @@ cache = ResponseCache(max_size=CACHE_MAX_SIZE)
 async def _init_engine():
     try:
         await engine.initialize()
+        # Warmup: send a dummy request to prime CUDA graphs, prefix cache, and JIT
+        logger.info("Sending warmup request...")
+        warmup_req = ChatRequest(
+            messages=[ChatMessage(role="user", content="hello")],
+            temperature=0,
+            max_tokens=1,
+        )
+        await engine.generate(warmup_req)
+        logger.info("Warmup complete!")
     except Exception:
         logger.exception("Engine initialization FAILED!")
 
@@ -30,7 +40,11 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Track 2: Chat Engine", lifespan=lifespan)
+app = FastAPI(
+    title="Track 2: Chat Engine",
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse,
+)
 
 
 @app.post("/v1/chat/completions", response_model=ChatResponse)
