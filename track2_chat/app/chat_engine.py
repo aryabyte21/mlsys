@@ -1,6 +1,7 @@
 import logging
+from functools import lru_cache
 
-from app.schemas import ChatRequest, ChatResponse
+from app.schemas import ChatRequest
 from app.constants import (
     ENABLE_CHUNKED_PREFILL,
     ENABLE_PREFIX_CACHING,
@@ -24,11 +25,22 @@ from vllm.utils import random_uuid
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=64)
+def _get_sampling_params(temperature: float, max_tokens: int) -> SamplingParams:
+    """Cache SamplingParams — benchmark always sends the same values."""
+    return SamplingParams(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        logprobs=1,
+    )
+
+
 class ChatEngine:
     def __init__(self):
         self.engine = None
         self.tokenizer = None
         self.is_ready = False
+        self._supports_thinking = None  # cache template capability
 
     async def initialize(self):
         if self.is_ready:
@@ -70,35 +82,47 @@ class ChatEngine:
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         self.tokenizer = await self.engine.get_tokenizer()
-        self.is_ready = True
-        logger.info("Engine initialization complete!")
 
-    async def generate(self, request: ChatRequest) -> ChatResponse:
-        messages = [{"role": m.role, "content": m.content} for m in request.messages]
-
-        # Disable Qwen3 thinking mode to avoid wasted tokens on <think> blocks
+        # Probe once whether the tokenizer supports enable_thinking
         try:
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
+            self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": "test"}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
+            self._supports_thinking = True
         except TypeError:
-            prompt = self.tokenizer.apply_chat_template(
+            self._supports_thinking = False
+
+        self.is_ready = True
+        logger.info("Engine initialization complete!")
+
+    async def generate(self, request: ChatRequest) -> dict:
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+        # Tokenize directly to token IDs — skip double tokenization
+        if self._supports_thinking:
+            token_ids = self.tokenizer.apply_chat_template(
                 messages,
-                tokenize=False,
+                tokenize=True,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        else:
+            token_ids = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
                 add_generation_prompt=True,
             )
 
-        sampling_params = SamplingParams(
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            logprobs=1,
-        )
+        # Reuse cached SamplingParams
+        sampling_params = _get_sampling_params(request.temperature, request.max_tokens)
 
         final_output = None
-        async for output in self.engine.generate(prompt, sampling_params, random_uuid()):
+        async for output in self.engine.generate(
+            {"prompt_token_ids": token_ids}, sampling_params, random_uuid()
+        ):
             final_output = output
 
         if final_output is None:
@@ -108,13 +132,14 @@ class ChatEngine:
         if output_data.logprobs is None:
             raise RuntimeError("logprobs are missing from vLLM output")
 
-        logprobs: list[float] = []
+        # Build response dict directly — skip Pydantic construction
+        logprobs = []
         for i, token_id in enumerate(output_data.token_ids):
             if i < len(output_data.logprobs):
-                step_logprobs = output_data.logprobs[i]
-                if token_id in step_logprobs:
-                    logprobs.append(step_logprobs[token_id].logprob)
+                step = output_data.logprobs[i]
+                if token_id in step:
+                    logprobs.append(step[token_id].logprob)
                 else:
                     logprobs.append(0.0)
 
-        return ChatResponse(output=output_data.text, logprobs=logprobs)
+        return {"output": output_data.text, "logprobs": logprobs}

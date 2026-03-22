@@ -3,7 +3,7 @@ import hashlib
 import json
 from collections import OrderedDict
 
-from app.schemas import ChatMessage, ChatResponse
+from app.schemas import ChatMessage
 
 
 class ResponseCache:
@@ -13,15 +13,11 @@ class ResponseCache:
     1. Persistent cache — stores completed responses (LRU eviction)
     2. Inflight dedup — coalesces concurrent identical requests so only one
        hits the GPU while the rest await the same result
-
-    With 36% duplicate rate in the benchmark data, temperature=0, and 128
-    concurrency, many identical requests arrive simultaneously. Without dedup,
-    each triggers a separate inference. With dedup, only the first does.
     """
 
     def __init__(self, max_size: int = 16384):
-        self._cache: OrderedDict[str, ChatResponse] = OrderedDict()
-        self._inflight: dict[str, asyncio.Future[ChatResponse]] = {}
+        self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._inflight: dict[str, asyncio.Future[dict]] = {}
         self._max_size = max_size
         self.hits = 0
         self.misses = 0
@@ -40,7 +36,7 @@ class ResponseCache:
 
     def get(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
-    ) -> ChatResponse | None:
+    ) -> dict | None:
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return None
@@ -53,8 +49,7 @@ class ResponseCache:
 
     def get_inflight(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
-    ) -> asyncio.Future[ChatResponse] | None:
-        """Return an existing inflight future for this request, or None."""
+    ) -> asyncio.Future[dict] | None:
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return None
@@ -65,12 +60,11 @@ class ResponseCache:
 
     def start_inflight(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
-    ) -> asyncio.Future[ChatResponse] | None:
-        """Register an inflight future for this request. Returns the future."""
+    ) -> asyncio.Future[dict] | None:
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return None
-        future: asyncio.Future[ChatResponse] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._inflight[key] = future
         return future
 
@@ -79,17 +73,14 @@ class ResponseCache:
         messages: list[ChatMessage],
         temperature: float,
         max_tokens: int,
-        response: ChatResponse,
+        response: dict,
     ) -> None:
-        """Complete inflight future and store in persistent cache."""
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return
-        # Store in persistent cache
         self._cache[key] = response
         if len(self._cache) > self._max_size:
             self._cache.popitem(last=False)
-        # Resolve waiting coroutines
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
             future.set_result(response)
@@ -101,7 +92,6 @@ class ResponseCache:
         max_tokens: int,
         error: Exception,
     ) -> None:
-        """Fail inflight future so waiting coroutines get the exception."""
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return
