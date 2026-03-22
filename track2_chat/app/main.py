@@ -8,7 +8,7 @@ from fastapi.responses import ORJSONResponse
 from app.cache import ResponseCache
 from app.chat_engine import ChatEngine
 from app.constants import CACHE_MAX_SIZE
-from app.schemas import ChatMessage, ChatRequest, ChatResponse
+from app.schemas import ChatMessage, ChatRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ cache = ResponseCache(max_size=CACHE_MAX_SIZE)
 async def _init_engine():
     try:
         await engine.initialize()
-        # Warmup: send a dummy request to prime CUDA graphs, prefix cache, and JIT
+        # Warmup: prime CUDA graphs, prefix cache, and JIT
         logger.info("Sending warmup request...")
         warmup_req = ChatRequest(
             messages=[ChatMessage(role="user", content="hello")],
@@ -47,7 +47,7 @@ app = FastAPI(
 )
 
 
-@app.post("/v1/chat/completions", response_model=ChatResponse)
+@app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
     if not engine.is_ready:
         raise HTTPException(status_code=503, detail="Engine is still initializing")
@@ -57,12 +57,12 @@ async def chat_completions(request: ChatRequest):
     if cached is not None:
         return cached
 
-    # Layer 2: another coroutine is already computing this exact request — wait for it
+    # Layer 2: another coroutine is already computing this exact request
     inflight = cache.get_inflight(request.messages, request.temperature, request.max_tokens)
     if inflight is not None:
         return await inflight
 
-    # Layer 3: we're the first — register inflight, run inference, resolve waiters
+    # Layer 3: first request — register inflight, run inference, resolve waiters
     future = cache.start_inflight(request.messages, request.temperature, request.max_tokens)
     try:
         response = await engine.generate(request)
