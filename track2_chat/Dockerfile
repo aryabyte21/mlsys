@@ -18,9 +18,11 @@ RUN uv sync
 ENV PORT=8000
 EXPOSE 8000
 
-# We need to make sure the GPU libraries are visible
+# GPU libraries
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-ENV VLLM_ATTENTION_BACKEND=FLASHINFER
+# vLLM optimizations for Blackwell (RTX 5080)
+ENV VLLM_USE_V1=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

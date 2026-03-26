@@ -1,13 +1,15 @@
 [project]
 name = "chat-engine"
 version = "0.1.0"
-description = "Starter kit for Track 2: Customer Chat"
+description = "Optimized LLM serving engine for Track 2: Customer Chat"
 requires-python = ">=3.12, <3.14"
 dependencies = [
     "fastapi",
     "uvicorn",
     "pydantic",
-    "vllm"
+    "vllm==0.8.5.post1",
+    "transformers<4.53.0",
+    "orjson",
 ]
 
 [tool.uv.pip]
