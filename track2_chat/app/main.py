@@ -56,6 +56,12 @@ async def chat_completions(request: ChatRequest):
     cached = cache.get(request.messages, request.temperature, request.max_tokens)
     if cached is not None:
         return cached
+    
+    # Semantic cache
+    if request.temperature == 0:
+        semantic_cached = cache.semantic_get(request.messages)
+        if semantic_cached is not None:
+            return semantic_cached
 
     # Layer 2: another coroutine is already computing this exact request
     inflight = cache.get_inflight(request.messages, request.temperature, request.max_tokens)
