@@ -115,7 +115,7 @@ class ResponseCache:
             # Keyword filter
             query_keywords = extract_keywords(query)
             
-            if not query_keywords.intersection(self._cache[key].get(["keywords"], set())):
+            if not query_keywords.intersection(self._cache[key].get("keywords", set())):
                 continue
             
             if score > best_score:
