@@ -17,6 +17,7 @@ from app.constants import (
     SPEC_NUM_TOKENS,
     SPEC_PROMPT_LOOKUP_MAX,
     SPEC_PROMPT_LOOKUP_MIN,
+    SWAP_SPACE,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -79,6 +80,7 @@ class ChatEngine:
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
+            swap_space=SWAP_SPACE,
             speculative_config=speculative_config,
         )
 
