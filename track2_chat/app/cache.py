@@ -21,7 +21,7 @@ class ResponseCache:
     """
 
     def __init__(self, max_size: int = 16384):
-        self._cache: OrderedDict[int, dict] = OrderedDict()
+        self._cache: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
         self._max_size = max_size
         self._embedder: SentenceTransformer | None = None
@@ -69,13 +69,11 @@ class ResponseCache:
         if key is None:
             return None
         
-        faiss_id = self._key_to_id.get(key)
-        
-        if faiss_id is not None and faiss_id in self._cache:
-            self._cache.move_to_end(faiss_id)
+        if key in self._cache:
+            self._cache.move_to_end(key)
             self.hits += 1
-            cached = self._cache[faiss_id]
-            return {"output": cached["output"], "logprobs": cached["logprobs"]}
+            cached = self._cache[key]
+            return cached
         
         self.misses += 1
         return None
@@ -88,36 +86,45 @@ class ResponseCache:
         
         query = messages[-1].content
         
-        query_keywords = extract_keywords(query)
         query_embedding = self._get_embedding(query)
+        
+        # FAISS index search
+        query_embedding = np.expand_dims(query_embedding, axis=0)
+        scores, indices = self._faiss_index.search(query_embedding, top_k)
         
         best_score = -1
         best_response = None
         
-        # FAISS index search
-        query_embedding = np.expand_dims(query_embedding, axis=0)
-        distances, indices = self._faiss_index.search(query_embedding, top_k)
-        
-        
-        for score, faiss_id in zip(distances[0], indices[0]):
+        for score, faiss_id in zip(scores[0], indices[0]):
             if faiss_id == -1:
                 continue
             
-            item = self._cache.get(int(faiss_id))
+            key = self._id_to_key.get(int(faiss_id))
+            if key is None:
+                continue
+            
+            # item = self._cache.get(int(faiss_id))
+            item = self._cache.get(key)
             
             if item is None:
                 continue
             
+            if key not in self._cache:
+                continue
+            
             # Keyword filter
-            if not query_keywords.intersection(item["keywords"]):
+            query_keywords = extract_keywords(query)
+            
+            if not query_keywords.intersection(self._cache[key].get(["keywords"], set())):
                 continue
             
             if score > best_score:
                 best_score = score
-                best_response = item
+                best_key = key
             
-        if best_score > semantic_threshold and best_response is not None:
-            return {"output": best_response["output"], "logprobs": best_response["logprobs"]}
+        if best_score > semantic_threshold and best_key is not None:
+            self._cache.move_to_end(best_key)
+            return self._cache[best_key]
         
         return None
             
@@ -153,8 +160,9 @@ class ResponseCache:
         if key is None:
             return
         
-        keywords = extract_keywords(messages[-1].content)
-        embedding = self._get_embedding(messages[-1].content)
+        
+        # keywords = extract_keywords(messages[-1].content)
+        # embedding = self._get_embedding(messages[-1].content)
         
         if key in self._key_to_id:
             faiss_id = self._key_to_id[key]
@@ -165,26 +173,33 @@ class ResponseCache:
             self._key_to_id[key] = faiss_id
             self._id_to_key[faiss_id] = key
         
-        self._cache[faiss_id] = {
-            **response,
-            "keywords": keywords,
-            "embedding": embedding,
-        }
+        self._cache[key] = response
+        
+        embedding = self._get_embedding(messages[-1].content)
         
         self._init_faiss(len(embedding))
+        
         self._faiss_index.add_with_ids(
             np.expand_dims(embedding, axis=0),
             np.array([faiss_id], dtype="int64")
             )
         
         if len(self._cache) > self._max_size:
-            old_id, _ = self._cache.popitem(last=False)
+            old_key, _ = self._cache.popitem(last=False)
+            old_id = self._key_to_id.pop(old_key, None)
+            # old_id = old_item["faiss_id"]
             
-            self._faiss_index.remove_ids(np.array([old_id], dtype="int64"))
+            # self._faiss_index.remove_ids(np.array([old_id], dtype="int64"))
             
-            old_key = self._id_to_key.pop(old_id, None)
-            if old_key:
-                self._key_to_id.pop(old_key, None)
+            # old_key = self._id_to_key.pop(old_id, None)
+            if old_key is not None:
+                # self._key_to_id.pop(old_key, None)
+                self._id_to_key.pop(old_id, None)
+                
+                if self._faiss_index is not None:
+                    self._faiss_index.remove_ids(
+                        np.array([old_id], dtype="int64")
+                    )
             
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
