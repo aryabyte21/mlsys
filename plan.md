@@ -127,7 +127,8 @@ Incoming Request (conc. 128)
 | 10 | 2026-03-29 | BF16 (no quant) on H200 | 1142 | 2592 | 115.55 | 1.2009 | identical — H200 has 141GB, memory never bottleneck |
 | 11 | 2026-03-29 | FP8 simulated 16GB (gpu=0.112) on H200 | 1140 | 2638 | 115.32 | 1.2009 | no OOM, FP8 fits in 16GB with max_num_seqs=256 |
 | 12 | 2026-03-29 | BF16 simulated 16GB (gpu=0.112) on H200 | 1211 | 2807 | 108.98 | 1.2001 | no OOM, but 6% slower — fewer concurrent seqs (160 vs 256) |
-| 13 | — | Full stack on RTX 5080 (Vast.ai) | — | — | — | — | pending — validate FP8 on real Blackwell |
+| 13 | 2026-03-29 | AWQ Marlin (Eslzzyl/Qwen3-4B-AWQ) on H200 | 1842 | 3798 | 75.13 | 1.2050 | 35% slower than FP8 on H200 — AWQ dequant overhead when FP8 works natively |
+| 14 | — | Full stack on RTX 5080 (Vast.ai) | — | — | — | — | pending — FP8 default, test AWQ as backup |
 
 ## Discoveries & Surprises
 
