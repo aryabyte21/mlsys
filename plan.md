@@ -122,7 +122,10 @@ Incoming Request (conc. 128)
 | 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
 | 6 | 2026-03-22 | V1+FP8+max512+warmup on H100-47 (full mem) | 1722 | 3633 | 77.09 | 1.2009 | all passed, slower GPU than H200 |
 | 7 | 2026-03-28 | V1+FP8+max512+gpu0.98+Pydantic skip on H200 | 1209 | 2696 | 110.17 | 1.2009 | all passed, app-level opts negligible on H200 — GPU is bottleneck |
-| 8 | — | Full stack on RTX 5080 | — | — | — | — | pending — MUST test FP8 vs BF16 vs AWQ |
+| 8 | 2026-03-29 | FP8+max512+gpu0.98+swap0 on H200 | 1144 | 2604 | 115.89 | 1.2009 | ~same as run 4-5, swap_space=0 no effect |
+| 9 | 2026-03-29 | FP8+max_batched=16384 on H200 | 1136 | 2608 | 116.02 | 1.2009 | identical — batch size irrelevant on H200 |
+| 10 | 2026-03-29 | BF16 (no quant) on H200 | 1142 | 2592 | 115.55 | 1.2009 | identical — H200 has 141GB, memory never bottleneck |
+| 11 | — | Full stack on RTX 5080 | — | — | — | — | pending — configs will diverge on 16GB |
 
 ## Discoveries & Surprises
 
