@@ -24,5 +24,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # vLLM optimizations for Blackwell (RTX 5080)
 ENV VLLM_USE_V1=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV VLLM_FLASH_ATTN_VERSION=2
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

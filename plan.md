@@ -1,6 +1,6 @@
 # Optimization Plan
 
-> Last updated: 2026-03-18
+> Last updated: 2026-03-28
 
 ## Current Goal
 
@@ -121,7 +121,8 @@ Incoming Request (conc. 128)
 | 4 | 2026-03-21 | V1 + FP8 on H200 | 1140 | 2579 | 116.11 | 1.2009 | works, ~6% throughput gain |
 | 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
 | 6 | 2026-03-22 | V1+FP8+max512+warmup on H100-47 (full mem) | 1722 | 3633 | 77.09 | 1.2009 | all passed, slower GPU than H200 |
-| 7 | — | Full stack on RTX 5080 (Docker via Vast.ai) | — | — | — | — | pending |
+| 7 | 2026-03-28 | V1+FP8+max512+gpu0.98+Pydantic skip on H200 | 1209 | 2696 | 110.17 | 1.2009 | all passed, app-level opts negligible on H200 — GPU is bottleneck |
+| 8 | — | Full stack on RTX 5080 | — | — | — | — | pending — MUST test FP8 vs BF16 vs AWQ |
 
 ## Discoveries & Surprises
 
@@ -140,6 +141,13 @@ Incoming Request (conc. 128)
 - **CUDA graphs give 8x throughput over enforce_eager on Blackwell** (from vLLM benchmarks)
 - **max_num_batched_tokens default (2048) is under-tuned** — vLLM source has TODO to tune it
 - **transformers>=4.53.0 breaks vLLM tokenizer** — all_special_tokens_extended removed, must pin
+- **[CRITICAL] FP8 may be 3x SLOWER than AWQ on Blackwell (SM120)** — CUTLASS lacks SM120 FP8 GEMM kernels, online dynamic FP8 has 17.9% overhead vs BF16. RTX 5090 benchmarks: AWQ ~140 tok/s vs FP8 ~45 tok/s (vLLM issues #28234, #37242)
+- **BF16 (no quant) may beat FP8 on RTX 5080** — 4B model is ~8GB in BF16, fits in 16GB with max_model_len=512. Must A/B test.
+- **AWQ Marlin is the recommended quantization for Blackwell** — `quantization="awq_marlin"` with AWQ checkpoint
+- **FP8 KV cache still broken on V1 + Blackwell** — PR #17005 closed, TRITON_MLA raises NotImplementedError for SM120
+- **cudagraph_mode=FULL may help** — better for small models with short prompts, less memory overhead than default FULL_AND_PIECEWISE
+- **max_num_batched_tokens could go to 16384+** — small model + short prompts benefit from larger batches
+- **KV cache math for 16GB RTX 5080**: FP8 model (~4.2GB) → ~10.5GB KV → ~4778 blocks → ~149 max concurrent (worst case) or ~251 (typical). BF16 model (~8GB) → ~6.7GB KV → ~3037 blocks → ~94-159 concurrent.
 
 ## Key Techniques & Skills
 
@@ -152,8 +160,8 @@ Incoming Request (conc. 128)
 
 ## Decisions
 
-- **FP8 over INT4/AWQ**: FP8 has minimal quality loss and native hardware support on RTX 5080
-- **max_model_len=1024**: Conservative but safe; max prompt+response is ~350 tokens
+- **FP8 over INT4/AWQ**: UNDER REVIEW — SM120 may lack native FP8 GEMM kernels, AWQ/BF16 could be faster
+- **max_model_len=512**: Reduced from 1024; max prompt+response is ~350 tokens, safe margin
 - **N-gram spec decode over Eagle/draft model**: No extra model needed, works in V1, low risk
 - **3 speculative tokens**: Balance between acceptance rate and overhead for short prompts
 - **disable_logprobs=False**: Critical — default True silently drops logprobs
@@ -167,9 +175,25 @@ Incoming Request (conc. 128)
 - enforce_eager — loses 8x throughput on Blackwell
 - num_scheduler_steps — V0-only, V1 already does async scheduling natively
 
+## RTX 5080 Benchmark Matrix (RunPod, $15 credits)
+
+Run these in order. Each run: start fresh pod, run full 13435-request benchmark at concurrency 128.
+
+| Run | Quantization | max_num_seqs | max_batched_tokens | Other Changes | Hypothesis |
+|-----|-------------|-------------|-------------------|---------------|-----------|
+| A | FP8 (current) | 256 | 8192 | baseline on 5080 | Establish 5080 baseline |
+| B | None (BF16) | 160 | 8192 | QUANTIZATION="" | BF16 may beat FP8 on SM120 |
+| C | FP8 | 256 | 16384 | larger batches | Better throughput for small model |
+| D | Best of A/B/C | best | best | cudagraph_mode=FULL | Full CUDA graphs for small model |
+| E | Best so far | best | best | all combined | Final best config |
+
+All configs via env vars — no rebuild needed between runs.
+
 ## Next Steps
 
-1. Deploy on Vast.ai RTX 5080 with Docker image and run benchmark
-2. If spec decode causes issues with logprobs, disable it via `SPEC_DECODE_ENABLED=false`
-3. Fine-tune: try max_model_len=512, spec_num_tokens=5, gpu_mem=0.98
-4. Final Docker image push to GHCR for submission
+1. ~~Add Blackwell env vars to Dockerfile~~ ✅ Done
+2. ~~Set swap_space=0~~ ✅ Done
+3. Build & push Docker image to GHCR
+4. Deploy on RunPod RTX 5080
+5. Run benchmark matrix A→E
+6. Pick best config, final Docker image push for submission
