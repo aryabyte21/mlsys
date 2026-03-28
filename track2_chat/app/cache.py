@@ -1,9 +1,10 @@
 import asyncio
 import hashlib
 import json
-from collections import OrderedDict
-
+import faiss
 import numpy as np
+
+from collections import OrderedDict
 from sentence_transformers import SentenceTransformer
 
 from app.schemas import ChatMessage
@@ -16,17 +17,23 @@ class ResponseCache:
     Two layers:
     1. Persistent cache — stores completed responses (LRU eviction)
     2. Inflight dedup — coalesces concurrent identical requests so only one
-       hits the GPU while the rest await the same result
+        hits the GPU while the rest await the same result
     """
 
     def __init__(self, max_size: int = 16384):
-        self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._cache: OrderedDict[int, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
         self._max_size = max_size
         self._embedder: SentenceTransformer | None = None
         self.hits = 0
         self.misses = 0
         self.dedup_hits = 0
+        
+        # FAISS variable
+        self._id_to_key: dict[int, str] = {}        # Map FAISS id -> original request key for debugging
+        self._key_to_id: dict[str, int] = {}
+        self._faiss_index = None
+        self._id_counter = 0
 
     def _make_key(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
@@ -49,24 +56,36 @@ class ResponseCache:
         emb = model.encode(text, normalize_embeddings=True)
         return np.array(emb, dtype="float32")
     
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        return float(np.dot(a, b))
-        
+    # Initialize FAISS if it's still empty
+    def _init_faiss(self, dim: int):
+        if self._faiss_index is None:
+            base = faiss.IndexFlatIP(dim)
+            self._faiss_index  = faiss.IndexIDMap(base)
+    
     def get(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
     ) -> dict | None:
         key = self._make_key(messages, temperature, max_tokens)
         if key is None:
             return None
-        if key in self._cache:
-            self._cache.move_to_end(key)
+        
+        faiss_id = self._key_to_id.get(key)
+        
+        if faiss_id is not None and faiss_id in self._cache:
+            self._cache.move_to_end(faiss_id)
             self.hits += 1
-            cached = self._cache[key]
+            cached = self._cache[faiss_id]
             return {"output": cached["output"], "logprobs": cached["logprobs"]}
+        
         self.misses += 1
         return None
 
-    def semantic_get(self, messages: list[ChatMessage]):
+    def semantic_get(self, messages: list[ChatMessage], top_k: int = 5, semantic_threshold: float = 0.8):
+        
+        # Sanity check
+        if self._faiss_index is None or len(self._cache) == 0:
+            return None
+        
         query = messages[-1].content
         
         query_keywords = extract_keywords(query)
@@ -75,22 +94,31 @@ class ResponseCache:
         best_score = -1
         best_response = None
         
-        for item in self._cache.values():
-            if "embedding" not in item:
+        # FAISS index search
+        query_embedding = np.expand_dims(query_embedding, axis=0)
+        distances, indices = self._faiss_index.search(query_embedding, top_k)
+        
+        
+        for score, faiss_id in zip(distances[0], indices[0]):
+            if faiss_id == -1:
                 continue
             
+            item = self._cache.get(int(faiss_id))
+            
+            if item is None:
+                continue
+            
+            # Keyword filter
             if not query_keywords.intersection(item["keywords"]):
                 continue
             
-            sim = self._cosine_similarity(query_embedding, item["embedding"])
-            
-            if sim > best_score:
-                best_score = sim
+            if score > best_score:
+                best_score = score
                 best_response = item
-                
-        if best_score > 0.85 and best_response is not None:
+            
+        if best_score > semantic_threshold and best_response is not None:
             return {"output": best_response["output"], "logprobs": best_response["logprobs"]}
-
+        
         return None
             
     def get_inflight(
@@ -128,14 +156,36 @@ class ResponseCache:
         keywords = extract_keywords(messages[-1].content)
         embedding = self._get_embedding(messages[-1].content)
         
-        self._cache[key] = {
+        if key in self._key_to_id:
+            faiss_id = self._key_to_id[key]
+        else:
+            faiss_id = self._id_counter
+            self._id_counter += 1
+            
+            self._key_to_id[key] = faiss_id
+            self._id_to_key[faiss_id] = key
+        
+        self._cache[faiss_id] = {
             **response,
             "keywords": keywords,
             "embedding": embedding,
         }
         
+        self._init_faiss(len(embedding))
+        self._faiss_index.add_with_ids(
+            np.expand_dims(embedding, axis=0),
+            np.array([faiss_id], dtype="int64")
+            )
+        
         if len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
+            old_id, _ = self._cache.popitem(last=False)
+            
+            self._faiss_index.remove_ids(np.array([old_id], dtype="int64"))
+            
+            old_key = self._id_to_key.pop(old_id, None)
+            if old_key:
+                self._key_to_id.pop(old_key, None)
+            
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
             future.set_result(response)
