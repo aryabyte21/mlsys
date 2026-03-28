@@ -1,4 +1,5 @@
 import logging
+from itertools import count
 from functools import lru_cache
 
 from app.schemas import ChatRequest
@@ -20,7 +21,6 @@ from app.constants import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
-from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,8 @@ class ChatEngine:
         self.tokenizer = None
         self.is_ready = False
         self._supports_thinking = None  # cache template capability
+        self._chat_template_kwargs = None
+        self._request_counter = count(1)
 
     async def initialize(self):
         if self.is_ready:
@@ -95,6 +97,13 @@ class ChatEngine:
         except TypeError:
             self._supports_thinking = False
 
+        self._chat_template_kwargs = {
+            "tokenize": True,
+            "add_generation_prompt": True,
+        }
+        if self._supports_thinking:
+            self._chat_template_kwargs["enable_thinking"] = False
+
         self.is_ready = True
         logger.info("Engine initialization complete!")
 
@@ -102,31 +111,24 @@ class ChatEngine:
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
         # Tokenize directly to token IDs — skip double tokenization
-        if self._supports_thinking:
-            token_ids = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        else:
-            token_ids = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+        token_ids = self.tokenizer.apply_chat_template(
+            messages, **self._chat_template_kwargs
+        )
 
         # Reuse cached SamplingParams
         sampling_params = _get_sampling_params(request.temperature, request.max_tokens)
 
         final_output = None
+        request_id = str(next(self._request_counter))
         async for output in self.engine.generate(
-            {"prompt_token_ids": token_ids}, sampling_params, random_uuid()
+            {"prompt_token_ids": token_ids}, sampling_params, request_id
         ):
             final_output = output
 
         if final_output is None:
             raise RuntimeError("No output generated")
+        if not final_output.outputs:
+            raise RuntimeError("No output candidates generated")
 
         output_data = final_output.outputs[0]
         if output_data.logprobs is None:
@@ -134,12 +136,9 @@ class ChatEngine:
 
         # Build response dict directly — skip Pydantic construction
         logprobs = []
-        for i, token_id in enumerate(output_data.token_ids):
-            if i < len(output_data.logprobs):
-                step = output_data.logprobs[i]
-                if token_id in step:
-                    logprobs.append(step[token_id].logprob)
-                else:
-                    logprobs.append(0.0)
+        append_logprob = logprobs.append
+        for token_id, step in zip(output_data.token_ids, output_data.logprobs):
+            token_logprob = step.get(token_id)
+            append_logprob(token_logprob.logprob if token_logprob is not None else 0.0)
 
         return {"output": output_data.text, "logprobs": logprobs}
