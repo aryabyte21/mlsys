@@ -52,26 +52,26 @@ async def chat_completions(request: ChatRequest):
     if not engine.is_ready:
         raise HTTPException(status_code=503, detail="Engine is still initializing")
 
+    cache_key = cache.make_key(request.messages, request.temperature, request.max_tokens)
+    if cache_key is None:
+        return await engine.generate(request)
+
     # Layer 1: persistent cache hit
-    cached = cache.get(request.messages, request.temperature, request.max_tokens)
+    cached = cache.get_by_key(cache_key)
     if cached is not None:
         return cached
 
-    # Layer 2: another coroutine is already computing this exact request
-    inflight = cache.get_inflight(request.messages, request.temperature, request.max_tokens)
-    if inflight is not None:
+    # Layer 2+3: claim or join inflight computation in one dictionary lookup
+    inflight, is_owner = cache.claim_inflight_by_key(cache_key)
+    if not is_owner:
         return await inflight
 
-    # Layer 3: first request — register inflight, run inference, resolve waiters
-    future = cache.start_inflight(request.messages, request.temperature, request.max_tokens)
     try:
         response = await engine.generate(request)
-        cache.complete_inflight(
-            request.messages, request.temperature, request.max_tokens, response
-        )
+        cache.complete_inflight_by_key(cache_key, response)
         return response
     except Exception as e:
-        cache.fail_inflight(request.messages, request.temperature, request.max_tokens, e)
+        cache.fail_inflight_by_key(cache_key, e)
         raise
 
 

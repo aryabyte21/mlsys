@@ -120,7 +120,8 @@ Incoming Request (conc. 128)
 | 3 | 2026-03-21 | V1 engine only on H200 | 1226 | 2663 | 109.48 | 1.2001 | works, marginal improvement |
 | 4 | 2026-03-21 | V1 + FP8 on H200 | 1140 | 2579 | 116.11 | 1.2009 | works, ~6% throughput gain |
 | 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
-| 6 | — | Full stack on RTX 5080 (Docker) | — | — | — | — | pending |
+| 6 | 2026-03-22 | V1+FP8+max512+warmup on H100-47 (full mem) | 1722 | 3633 | 77.09 | 1.2009 | all passed, slower GPU than H200 |
+| 7 | — | Full stack on RTX 5080 (Docker via Vast.ai) | — | — | — | — | pending |
 
 ## Discoveries & Surprises
 
