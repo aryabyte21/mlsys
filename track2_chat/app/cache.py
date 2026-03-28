@@ -7,7 +7,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from app.schemas import ChatMessage
-from normalize import extract_keywords
+from app.normalize import extract_keywords
 
 
 class ResponseCache:
@@ -61,7 +61,8 @@ class ResponseCache:
         if key in self._cache:
             self._cache.move_to_end(key)
             self.hits += 1
-            return self._cache[key]
+            cached = self._cache[key]
+            return {"output": cached["output"], "logprobs": cached["logprobs"]}
         self.misses += 1
         return None
 
@@ -87,9 +88,9 @@ class ResponseCache:
                 best_score = sim
                 best_response = item
                 
-        if best_score > 0.85:
-            return best_response
-        
+        if best_score > 0.85 and best_response is not None:
+            return {"output": best_response["output"], "logprobs": best_response["logprobs"]}
+
         return None
             
     def get_inflight(

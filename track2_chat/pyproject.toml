@@ -10,6 +10,7 @@ dependencies = [
     "vllm==0.8.5.post1",
     "transformers<4.53.0",
     "orjson",
+    "sentence-transformers",
 ]
 
 [tool.uv.pip]
