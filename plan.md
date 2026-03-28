@@ -125,7 +125,9 @@ Incoming Request (conc. 128)
 | 8 | 2026-03-29 | FP8+max512+gpu0.98+swap0 on H200 | 1144 | 2604 | 115.89 | 1.2009 | ~same as run 4-5, swap_space=0 no effect |
 | 9 | 2026-03-29 | FP8+max_batched=16384 on H200 | 1136 | 2608 | 116.02 | 1.2009 | identical — batch size irrelevant on H200 |
 | 10 | 2026-03-29 | BF16 (no quant) on H200 | 1142 | 2592 | 115.55 | 1.2009 | identical — H200 has 141GB, memory never bottleneck |
-| 11 | — | Full stack on RTX 5080 | — | — | — | — | pending — configs will diverge on 16GB |
+| 11 | 2026-03-29 | FP8 simulated 16GB (gpu=0.112) on H200 | 1140 | 2638 | 115.32 | 1.2009 | no OOM, FP8 fits in 16GB with max_num_seqs=256 |
+| 12 | 2026-03-29 | BF16 simulated 16GB (gpu=0.112) on H200 | 1211 | 2807 | 108.98 | 1.2001 | no OOM, but 6% slower — fewer concurrent seqs (160 vs 256) |
+| 13 | — | Full stack on RTX 5080 (Vast.ai) | — | — | — | — | pending — validate FP8 on real Blackwell |
 
 ## Discoveries & Surprises
 
