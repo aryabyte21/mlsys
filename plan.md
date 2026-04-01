@@ -115,6 +115,11 @@ Incoming Request (conc. 128)
 - Application-layer response caching with SHA256 keys
 - vLLM AsyncEngineArgs tuning for high-concurrency serving
 
+
+## Speculative decoding
+- Use a smaller model to generate candidate tokens (will gave to test with the smaller model which works in our favour)
+- 
+
 ## Decisions
 
 - **FP8 over INT4/AWQ**: FP8 has minimal quality loss and native hardware support on RTX 5080

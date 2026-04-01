@@ -2,6 +2,7 @@ from app.schemas import ChatRequest, ChatResponse
 from app.constants import (
     MODEL_NAME, MAX_MODEL_LENGTH,
     CHUNKED_PREFILL_ENABLED, MAX_NUM_BATCHED_TOKENS,
+    SPECULATIVE_MODEL_NAME, NUM_SPECULATIVE_TOKENS,
     MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION, ENABLE_PREFIX_CACHING,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -34,6 +35,8 @@ class ChatEngine:
             max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
             max_num_seqs=MAX_NUM_SEQS,
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
+            speculative_model=SPECULATIVE_MODEL_NAME,
+            num_speculative_tokens=NUM_SPECULATIVE_TOKENS,
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)

@@ -5,6 +5,11 @@ import os
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 MAX_MODEL_LENGTH = 8192
 
+# Speculative Decoding Constants
+# Using a 0.5B Qwen model to draft tokens for your 4B model (must share the exact same tokenizer)
+SPECULATIVE_MODEL_NAME = os.environ.get("SPECULATIVE_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+NUM_SPECULATIVE_TOKENS = int(os.environ.get("NUM_SPECULATIVE_TOKENS", "5"))
+
 # Opt 2: Chunked Prefill tuning parameters
 # Tune these to find the best P99 latency vs throughput tradeoff
 CHUNKED_PREFILL_ENABLED = True
