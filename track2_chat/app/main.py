@@ -58,7 +58,7 @@ async def chat_completions(request: ChatRequest):
         return cached
     
     # Semantic cache
-    if request.temperature == 0:
+    if request.temperature == 0:    # 0 = deterministic = 1 probability
         semantic_cached = cache.semantic_get(request.messages)
         if semantic_cached is not None:
             return semantic_cached

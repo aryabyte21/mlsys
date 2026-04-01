@@ -78,14 +78,63 @@ class ResponseCache:
         self.misses += 1
         return None
 
-    def semantic_get(self, messages: list[ChatMessage], top_k: int = 5, semantic_threshold: float = 0.8):
+    def keyword_get(self, query: str, threshold: float = 0.55, hard_stop: float = 0.9):
+        
+        # Get query keywords
+        query_keywords = extract_keywords(query)
+
+        # If no keyword, then the question is unimportant
+        if not query_keywords:
+            return None
+
+        # Var to save the best value
+        best_match = None
+        best_score = 0
+
+        # Loop through every item in cache
+        for key, item in self._cache.items():
+            
+            # Extract the keyword from cache
+            item_keywords = item.get("keywords", set())
+            
+            # Skip if empty
+            if not item_keywords:
+                continue
+
+            # Check if any keyword intersect and get all keywords (Jaccard Similarity)
+            union = query_keywords.union(item_keywords)
+            if not union:
+                continue
+            
+            intersection = query_keywords.intersection(item_keywords)
+
+            # Similarity Score
+            score = len(intersection) / len(union)
+
+            # If the similarity is very very high, we don't check the rest of the cache
+            if score >= hard_stop:
+                self._cache.move_to_end(key)
+                return item
+
+            # Update the best candidate
+            if score > best_score:
+                best_score = score
+                best_match = key
+
+        # If the most similar cache is above the similarity threshold and not empty we use it
+        if best_score >= threshold and best_match is not None:
+            self._cache.move_to_end(best_match)
+            return self._cache[best_match]
+
+        return None
+
+    def embedding_get(self, query:str, top_k: int = 5, threshold: float = 0.55, hard_stop: float = 0.9):
         
         # Sanity check
         if self._faiss_index is None or len(self._cache) == 0:
             return None
         
-        query = messages[-1].content
-        
+        # query = messages[-1].content
         query_embedding = self._get_embedding(query)
         
         # FAISS index search
@@ -93,41 +142,58 @@ class ResponseCache:
         scores, indices = self._faiss_index.search(query_embedding, top_k)
         
         best_score = -1
-        best_response = None
+        best_key = None
         
         for score, faiss_id in zip(scores[0], indices[0]):
             if faiss_id == -1:
                 continue
             
             key = self._id_to_key.get(int(faiss_id))
-            if key is None:
+            if key is None or key not in self._cache:
                 continue
             
-            # item = self._cache.get(int(faiss_id))
-            item = self._cache.get(key)
-            
-            if item is None:
-                continue
-            
-            if key not in self._cache:
-                continue
-            
-            # Keyword filter
-            query_keywords = extract_keywords(query)
-            
-            if not query_keywords.intersection(self._cache[key].get("keywords", set())):
-                continue
-            
+            # Hard Stop
+            if score >= hard_stop:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+
             if score > best_score:
                 best_score = score
                 best_key = key
             
-        if best_score > semantic_threshold and best_key is not None:
+        if best_score >= threshold and best_key is not None:
             self._cache.move_to_end(best_key)
             return self._cache[best_key]
         
         return None
-            
+    
+    def semantic_get(self, messages: list[ChatMessage], keyword_threshold: float = 0.55, semantic_threshold: float = 0.55, hard_stop: float = 0.85, top_k: int = 5):
+
+        if len(self._cache) == 0:
+            return None
+
+        # Get the query
+        query = messages[-1].content
+        
+        # Keyword Similarity Checking
+        result = self.keyword_get(
+            query,
+            threshold=keyword_threshold,
+            hard_stop=hard_stop
+        )
+        if result is not None:
+            return result
+
+        # Embedding Similarity checking
+        result = self.embedding_get(
+            query,
+            top_k=top_k,
+            threshold=semantic_threshold,
+            hard_stop=hard_stop
+        )
+        
+        return result
+    
     def get_inflight(
         self, messages: list[ChatMessage], temperature: float, max_tokens: int
     ) -> asyncio.Future[dict] | None:
