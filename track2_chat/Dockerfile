@@ -21,10 +21,12 @@ EXPOSE 8000
 # GPU libraries
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# vLLM optimizations for Blackwell (RTX 5080)
-ENV VLLM_USE_V1=1
+# vLLM optimizations
+ENV VLLM_USE_V1=0
+ENV NUM_SCHEDULER_STEPS=10
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-ENV VLLM_FLASH_ATTN_VERSION=2
-ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV VLLM_NO_USAGE_STATS=1
+ENV CUDA_MODULE_LOADING=LAZY
+ENV QUANTIZATION=""
 
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--loop", "uvloop"]
