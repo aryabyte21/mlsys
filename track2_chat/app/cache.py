@@ -93,7 +93,8 @@ class ResponseCache:
 
         for message in messages:
             role_bytes = message.role.encode("utf-8")
-            content_bytes = message.content.encode("utf-8")
+            # Normalize content for more exact-match hits
+            content_bytes = message.content.lower().strip().encode("utf-8")
             hasher.update(struct.pack("<I", len(role_bytes)))
             hasher.update(role_bytes)
             hasher.update(struct.pack("<I", len(content_bytes)))
