@@ -7,7 +7,7 @@ QUANTIZATION = os.getenv("QUANTIZATION", "") or None
 KV_CACHE_DTYPE = os.getenv("KV_CACHE_DTYPE", "auto")
 MAX_NUM_SEQS = int(os.getenv("MAX_NUM_SEQS", "256"))
 MAX_NUM_BATCHED_TOKENS = int(os.getenv("MAX_NUM_BATCHED_TOKENS", "8192"))
-ENABLE_PREFIX_CACHING = os.getenv("ENABLE_PREFIX_CACHING", "true").lower() == "true"
+ENABLE_PREFIX_CACHING = os.getenv("ENABLE_PREFIX_CACHING", "false").lower() == "true"
 ENABLE_CHUNKED_PREFILL = os.getenv("ENABLE_CHUNKED_PREFILL", "true").lower() == "true"
 CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "16384"))
 SWAP_SPACE = int(os.getenv("SWAP_SPACE", "0"))  # V1 uses recomputation, not swap
