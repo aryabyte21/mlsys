@@ -12,6 +12,7 @@ from app.constants import (
     MAX_NUM_BATCHED_TOKENS,
     MAX_NUM_SEQS,
     MODEL_NAME,
+    NUM_SCHEDULER_STEPS,
     QUANTIZATION,
     SPEC_DECODE_ENABLED,
     SPEC_NUM_TOKENS,
@@ -81,6 +82,7 @@ class ChatEngine:
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
             swap_space=SWAP_SPACE,
+            num_scheduler_steps=NUM_SCHEDULER_STEPS,
             speculative_config=speculative_config,
         )
 

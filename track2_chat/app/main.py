@@ -7,7 +7,7 @@ from fastapi.responses import ORJSONResponse
 
 from app.cache import ResponseCache
 from app.chat_engine import ChatEngine
-from app.constants import CACHE_MAX_SIZE
+from app.constants import CACHE_MAX_SIZE, SEMANTIC_CACHE_ENABLED
 from app.schemas import ChatMessage, ChatRequest
 
 logging.basicConfig(level=logging.INFO)
@@ -56,19 +56,28 @@ async def chat_completions(request: ChatRequest):
     if cache_key is None:
         return await engine.generate(request)
 
-    # Layer 1: persistent cache hit
+    # Layer 1: exact-match cache hit
     cached = cache.get_by_key(cache_key)
     if cached is not None:
         return cached
 
-    # Layer 2+3: claim or join inflight computation in one dictionary lookup
+    # Layer 2: semantic cache (keyword + embedding similarity)
+    if SEMANTIC_CACHE_ENABLED and request.temperature == 0:
+        semantic_cached = await cache.semantic_get_async(request.messages)
+        if semantic_cached is not None:
+            # Store under exact key too so future identical requests are instant
+            cache.complete_inflight_by_key(cache_key, semantic_cached)
+            return semantic_cached
+
+    # Layer 3: claim or join inflight computation
     inflight, is_owner = cache.claim_inflight_by_key(cache_key)
     if not is_owner:
         return await inflight
 
     try:
         response = await engine.generate(request)
-        cache.complete_inflight_by_key(cache_key, response)
+        query_text = request.messages[-1].content if SEMANTIC_CACHE_ENABLED else None
+        cache.complete_inflight_by_key(cache_key, response, query_text=query_text)
         return response
     except Exception as e:
         cache.fail_inflight_by_key(cache_key, e)

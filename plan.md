@@ -1,205 +1,120 @@
 # Optimization Plan
 
-> Last updated: 2026-03-28
+> Last updated: 2026-04-03
 
 ## Current Goal
 
-Build and optimize a high-throughput vLLM serving engine for Track 2 (Customer Support Chatbot)
-targeting maximum throughput and minimum latency at 128 concurrency on a single RTX 5080.
+Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 128 concurrency on RTX 5080 (16GB).
 
-## Hypothesis
+## System Understanding
 
-The biggest performance gains will come from (in order):
-1. **FP8 quantization** — halves model memory, freeing VRAM for more concurrent KV caches
-2. **FP8 KV cache** — halves KV cache memory, critical for 128 concurrency
-3. **Reduced max_model_len** — inputs are 6-92 chars, outputs max 256 tokens → 1024 is plenty
-4. **Exact-match response cache + inflight dedup** — 36.1% duplicates; dedup coalesces concurrent identical requests
-5. **N-gram speculative decoding** — 3 draft tokens per step, formulaic responses have high acceptance rate
-6. **max_num_batched_tokens=8192** — default 2048 is under-tuned for high-concurrency decode
-7. **APC + chunked prefill** — built-in vLLM features for prefix sharing and P99 reduction
-8. **Disabling Qwen3 thinking mode** — prevents wasted tokens on `<think>` blocks
-9. **V1 engine + CUDA graphs** — async scheduling + 8x throughput over eager mode on Blackwell
+### Bottleneck Analysis
+- **99% of latency is autoregressive decode** — each step reads full model weights from VRAM
+- **Memory bandwidth bound** — A100 PCIe (2 TB/s): ~29 req/s; RTX 5080 (960 GB/s): expected ~15 req/s raw
+- Prefill is negligible (inputs are 12 tokens average)
+- HTTP/tokenization/scheduling overhead is <1% of total time
 
-## Key Data Insights
+### Weight Read Cost Per Decode Step
+| Quantization | Model Size | Time @ 960 GB/s (5080) | Time @ 2 TB/s (A100) |
+|---|---|---|---|
+| BF16 | ~8 GB | 8.3 ms | 4.0 ms |
+| FP8 | ~4 GB | 4.2 ms | 2.0 ms |
+| INT4 (AWQ) | ~2 GB | 2.1 ms | 1.0 ms |
 
-- 13,435 total benchmark queries, 8,582 unique (36.1% duplicate rate)
-- All single-turn: `[{"role": "user", "content": "..."}]` — no multi-turn sessions
-- Benchmark uses `temperature=0` (greedy/deterministic), `max_tokens=256`
-- Input lengths: 6-92 characters (~15-40 tokens after tokenization)
-- Response format: `{"output": "...", "logprobs": [...]}` (NOT OpenAI format)
-- Benchmark computes P99 (not P95 as spec says)
+### Data Characteristics (13,435 training queries)
+- 8,582 unique (36.1% exact duplicates)
+- Query length: mean 47 chars (~12 tokens), max 92 chars (~23 tokens)
+- Duplicates spread far apart (median 7,858 positions) — **inflight dedup barely fires** (only 12/4,853 within 128 positions)
+- 76.8% of queries have a semantic match (TF-IDF cosine > 0.5)
+- 35.8% have near-duplicates (cosine > 0.7)
+- ~17 distinct intent clusters (account mgmt, orders, delivery, refunds, etc.)
+- 25% contain template variables like `{{Order Number}}` (literal strings in data)
+- Distribution: 75% generic/low-risk for caching, 13.4% entity-specific/high-risk
 
-## Architecture
+## Strategy (Ranked by Expected Impact)
 
-```
-Incoming Request (conc. 128)
-    │
-    ▼
-┌──────────────────────┐
-│  Exact-Match Cache    │──hit──▶ Return instantly (0ms)
-└──────────┬───────────┘
-           │ miss
-           ▼
-┌──────────────────────┐
-│  Inflight Dedup       │──dup──▶ Await first result (no GPU cost)
-└──────────┬───────────┘
-           │ first
-           ▼
-┌─────────────────────────────────────────────────┐
-│  vLLM V1 AsyncLLMEngine (Blackwell-optimized)    │
-│  ┌────────────────────────────────────────────┐  │
-│  │ Model: Qwen3-4B-Instruct-2507 (FP8)       │  │
-│  │ KV Cache: FP8, max_model_len=1024          │  │
-│  │ Attention: FlashInfer                       │  │
-│  │ Speculative: n-gram (3 tokens, lookup 2-4)  │  │
-│  │ APC: enabled (shared prefix caching)        │  │
-│  │ Chunked Prefill: enabled (P99 reduction)    │  │
-│  │ max_num_seqs: 256                           │  │
-│  │ max_num_batched_tokens: 8192                │  │
-│  │ gpu_memory_utilization: 0.95                │  │
-│  │ CUDA graphs: enabled (8x over eager)        │  │
-│  └────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-         │
-         ▼
-    Cache result, resolve dedup waiters
-```
+### 1. Smart Semantic Caching — HIGHEST IMPACT
+**Why**: Keyword similarity at Jaccard >= 0.65 would push hit rate from 36% to 77%. That means only 3,089 queries need GPU inference instead of 8,582.
+- At ~29 req/s GPU speed: 3,089/29 = ~107s for GPU work
+- Cached requests complete in <10ms
+- Projected throughput: 13,435/107 ≈ **126 req/s** (4.3x improvement)
 
-## Full Optimization Stack
+**Safety approach (don't degrade perplexity)**:
+- Use TWO-TIER thresholds: keyword Jaccard >= 0.80 AND embedding cosine >= 0.90
+- Only cache-hit for queries WITHOUT entity-specific template variables (safe 75%)
+- For entity queries: require exact keyword match OR cosine >= 0.95
+- Validate: run benchmark twice and compare per-request perplexity distribution
 
-### Tier 1 — High Impact
+**Implementation**: MiniLM-L6-v2 embeddings (80MB model, CPU-only) + FAISS IndexFlatIP + keyword Jaccard pre-filter
 
-| # | Optimization | Mechanism | Status |
-|---|-------------|-----------|--------|
-| 1 | FP8 model quantization | `quantization="fp8"` | Done |
-| 2 | FP8 KV cache | `kv_cache_dtype="fp8"` | Done |
-| 3 | Reduced max_model_len | `max_model_len=1024` (from 8192) | Done |
-| 4 | Exact-match response cache | SHA256 LRU cache, 36% hit rate | Done |
-| 5 | Inflight request dedup | asyncio futures coalesce concurrent identical requests | Done |
-| 6 | N-gram speculative decoding | 3 tokens, lookup 2-4, disable_logprobs=False | Done |
-| 7 | Disable Qwen3 thinking | `enable_thinking=False` in chat template | Done |
+### 2. vLLM Version Strategy — CRITICAL FOR 5080
+**Problem**: FP8 is BROKEN on SM120 in vLLM 0.8.5.post1. CUTLASS SM120 FP8 kernels were merged July 2025.
 
-### Tier 2 — Medium Impact
+**Options**:
+| Option | Pros | Cons |
+|---|---|---|
+| Upgrade vLLM to ≥0.10 | FP8 works on SM120, 909 tok/s reported | API changes, untested |
+| Stay on 0.8.5 + BF16 | Stable, known behavior | 8GB model = less KV room on 5080 |
+| Stay on 0.8.5 + AWQ Marlin | 2GB model, most KV room | 35% slower than FP8 on H200 (dequant overhead) |
 
-| # | Optimization | Mechanism | Status |
-|---|-------------|-----------|--------|
-| 8 | max_num_batched_tokens=8192 | Up from 2048 default, reduces scheduling overhead | Done |
-| 9 | V1 engine | `VLLM_USE_V1=1`, async scheduling, overlapped CPU/GPU | Done |
-| 10 | CUDA graphs | Default (not enforce_eager), 8x throughput on Blackwell | Done |
-| 11 | Automatic Prefix Caching | `enable_prefix_caching=True` | Done |
-| 12 | Chunked prefill | `enable_chunked_prefill=True` | Done |
-| 13 | GPU memory utilization | `gpu_memory_utilization=0.95` (from 0.9) | Done |
-| 14 | Batch size tuning | `max_num_seqs=256` | Done |
-| 15 | CUDA memory defrag | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Done |
+**Decision**: Test BF16 on 5080 first (it fits: 8GB model + 7GB KV = 15GB < 16GB). If KV capacity limits max_num_seqs below 128, try AWQ. Upgrading vLLM is high-risk without testing.
 
-### Tier 3 — Fine-Tuning (After Benchmark)
+### 3. V0 Engine + Multi-Step Scheduling
+**Why**: V1 may be 5-10% slower than V0 with `num_scheduler_steps=8-10` on A100 (confirmed in vLLM forum). V0 multi-step amortizes Python scheduling and GPU-CPU sync overhead.
 
-| # | Optimization | Notes |
-|---|-------------|-------|
-| 16 | max_model_len reduction to 512 | If 1024 is overkill, halves KV per seq |
-| 17 | spec_num_tokens tuning (2 vs 3 vs 5) | Measure acceptance rate, find sweet spot |
-| 18 | gpu_memory_utilization=0.98 | Push VRAM harder if no OOM |
+**Config**: `VLLM_USE_V1=0 NUM_SCHEDULER_STEPS=10`
+- Already tested: 29.05 req/s vs V1's 27.95 (+4% on A100)
+- Combined with semantic cache, this compounds
 
-### Deprioritized
+### 4. Speculative Decoding — CONFIRMED HARMFUL
+**Evidence** (3 independent sources):
+- EXSpec (ICLR 2026): Alignment overhead 47% at BS=16, grows superlinearly
+- MagicDec (ICLR 2025): 0.94x speedup (6% SLOWDOWN) at BS=128 with <512 token sequences
+- vLLM GitHub #16258: ngram spec decode 2x slower despite 70% acceptance rate
 
-| # | Optimization | Reason |
-|---|-------------|--------|
-| - | Semantic/fuzzy cache | Risk of incorrect logprobs → perplexity degradation |
-| - | Session-aware scheduler | Benchmark is single-turn, no sessions to track |
-| - | CPU KV cache offload | V1 engine uses recomputation, not CPU swap |
-| - | enforce_eager | Loses 8x throughput on Blackwell due to no CUDA graphs |
-| - | num_scheduler_steps | V0-only, incompatible with spec decode, V1 does it natively |
+**Decision**: Keep disabled. Spec decode only helps at low concurrency (<16) with long sequences (>4K tokens).
+
+### 5. Configuration Tuning
+- `max_model_len=320` — max prompt+response is ~296 tokens (23 input + 256 output + chat template overhead). Tested, works.
+- `max_num_batched_tokens=16384` — allows more tokens per scheduling step for small model
+- `max_num_seqs=256` (or 160 for BF16 on 16GB)
+- `gpu_memory_utilization=0.95`
 
 ## Experiment Log
 
 | # | Date | Config Change | P50 (ms) | P99 (ms) | Throughput (req/s) | Perplexity | Verdict |
-|---|------|--------------|----------|----------|-------------------|------------|---------|
-| 0 | — | baseline (starter kit, no opts) | — | — | — | — | pending |
-| 1 | 2026-03-17 | Tier 1+2 on Modal L4 (no FP8, no spec) | 9859 | 19053 | 13.33 | 1.2000 | L4 baseline — high latency from network + weak GPU |
-| 2 | 2026-03-21 | Vanilla baseline on H200 (no FP8, no V1, no spec, no FlashInfer) | 1219 | 2767 | 108.40 | 1.2001 | working baseline — all 13435 passed |
-| 3 | 2026-03-21 | V1 engine only on H200 | 1226 | 2663 | 109.48 | 1.2001 | works, marginal improvement |
-| 4 | 2026-03-21 | V1 + FP8 on H200 | 1140 | 2579 | 116.11 | 1.2009 | works, ~6% throughput gain |
-| 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
-| 6 | 2026-03-22 | V1+FP8+max512+warmup on H100-47 (full mem) | 1722 | 3633 | 77.09 | 1.2009 | all passed, slower GPU than H200 |
-| 7 | 2026-03-28 | V1+FP8+max512+gpu0.98+Pydantic skip on H200 | 1209 | 2696 | 110.17 | 1.2009 | all passed, app-level opts negligible on H200 — GPU is bottleneck |
-| 8 | 2026-03-29 | FP8+max512+gpu0.98+swap0 on H200 | 1144 | 2604 | 115.89 | 1.2009 | ~same as run 4-5, swap_space=0 no effect |
-| 9 | 2026-03-29 | FP8+max_batched=16384 on H200 | 1136 | 2608 | 116.02 | 1.2009 | identical — batch size irrelevant on H200 |
-| 10 | 2026-03-29 | BF16 (no quant) on H200 | 1142 | 2592 | 115.55 | 1.2009 | identical — H200 has 141GB, memory never bottleneck |
-| 11 | 2026-03-29 | FP8 simulated 16GB (gpu=0.112) on H200 | 1140 | 2638 | 115.32 | 1.2009 | no OOM, FP8 fits in 16GB with max_num_seqs=256 |
-| 12 | 2026-03-29 | BF16 simulated 16GB (gpu=0.112) on H200 | 1211 | 2807 | 108.98 | 1.2001 | no OOM, but 6% slower — fewer concurrent seqs (160 vs 256) |
-| 13 | 2026-03-29 | AWQ Marlin (Eslzzyl/Qwen3-4B-AWQ) on H200 | 1842 | 3798 | 75.13 | 1.2050 | 35% slower than FP8 on H200 — AWQ dequant overhead when FP8 works natively |
-| 14 | — | Full stack on RTX 5080 (Vast.ai) | — | — | — | — | pending — FP8 default, test AWQ as backup |
+|---|------|---|---|---|---|---|---|
+| 1-13 | Mar | See git history | — | — | — | — | H200/H100/L4 runs |
+| A1 | 2026-04-02 | V1+FP8+gpu0.4 on A100 PCIe | 4636 | 9484 | 28.50 | 1.2006 | A100 baseline |
+| A2 | 2026-04-02 | V1+BF16+gpu0.95 on A100 PCIe | 4756 | 9745 | 27.95 | 1.1990 | FP8≈BF16 on A100 |
+| A3 | 2026-04-02 | V0+BF16+steps10+uvloop on A100 | 4641 | 9168 | 29.05 | 1.1996 | +4% vs V1, P99 -6% |
+| A4 | 2026-04-02 | V0+FP8+steps10+uvloop on A100 | 4571 | 9350 | 29.25 | 1.2010 | best raw throughput |
+| A5 | 2026-04-02 | V0+AWQ+steps10+uvloop on A100 | 5029 | 9281 | 28.01 | 1.2050 | AWQ dequant overhead |
+| A6 | 2026-04-02 | V1+BF16+max320+seqs128 on A100 | 4685 | 9534 | 28.34 | 1.1997 | reducing seqs didn't help |
+| A7 | pending | V1+BF16+semantic_cache on A100 | — | — | — | — | testing now |
 
 ## Discoveries & Surprises
 
-- **36.1% duplicate rate** in training data — exact-match caching is extremely high impact
-- **Benchmark is single-turn** (not multi-turn) — session-based optimizations irrelevant
-- **Benchmark uses P99** (code) not P95 (spec doc) — target P99 reduction
-- **temperature=0 always** — makes caching lossless (deterministic outputs)
-- **max_tokens=256** is set by benchmark, not configurable from engine side
-- **vLLM spec decode disable_logprobs defaults to True** — MUST set False or logprobs silently missing
-- **V1 engine doesn't use CPU swap** — uses recomputation-based preemption instead
-- **V1 engine + FP8 KV cache incompatible** in vLLM 0.8.5.post1 — `VLLM_USE_V1=1` raises NotImplementedError with `--kv-cache-dtype`
-- **ngram spec decode on V1 is experimental** — causes EngineDeadError crashes under load
-- **Eval uses P50 and P95** (not P99) per project spec, though benchmark script reports P99
-- **FlashInfer + FP8 + V1 crashes** — EngineDeadError under load. FlashInfer FP8 attention with scale 1.0 causes engine core death
-- **V1 + FP8 (no FlashInfer) is stable** — confirmed 116 req/s on H200, all 13435 passed, perplexity 1.2009
-- **CUDA graphs give 8x throughput over enforce_eager on Blackwell** (from vLLM benchmarks)
-- **max_num_batched_tokens default (2048) is under-tuned** — vLLM source has TODO to tune it
-- **transformers>=4.53.0 breaks vLLM tokenizer** — all_special_tokens_extended removed, must pin
-- **[CRITICAL] FP8 may be 3x SLOWER than AWQ on Blackwell (SM120)** — CUTLASS lacks SM120 FP8 GEMM kernels, online dynamic FP8 has 17.9% overhead vs BF16. RTX 5090 benchmarks: AWQ ~140 tok/s vs FP8 ~45 tok/s (vLLM issues #28234, #37242)
-- **BF16 (no quant) may beat FP8 on RTX 5080** — 4B model is ~8GB in BF16, fits in 16GB with max_model_len=512. Must A/B test.
-- **AWQ Marlin is the recommended quantization for Blackwell** — `quantization="awq_marlin"` with AWQ checkpoint
-- **FP8 KV cache still broken on V1 + Blackwell** — PR #17005 closed, TRITON_MLA raises NotImplementedError for SM120
-- **cudagraph_mode=FULL may help** — better for small models with short prompts, less memory overhead than default FULL_AND_PIECEWISE
-- **max_num_batched_tokens could go to 16384+** — small model + short prompts benefit from larger batches
-- **KV cache math for 16GB RTX 5080**: FP8 model (~4.2GB) → ~10.5GB KV → ~4778 blocks → ~149 max concurrent (worst case) or ~251 (typical). BF16 model (~8GB) → ~6.7GB KV → ~3037 blocks → ~94-159 concurrent.
-
-## Key Techniques & Skills
-
-- FP8 quantization on RTX 5080 (Blackwell) for inference memory savings
-- FlashInfer attention backend for CUDA 12.8 compatibility
-- Application-layer response caching with SHA256 keys + inflight dedup
-- N-gram speculative decoding for formulaic customer service responses
-- vLLM V1 engine with async scheduling and CUDA graphs
-- PYTORCH_CUDA_ALLOC_CONF for memory defragmentation
-
-## Decisions
-
-- **FP8 over INT4/AWQ**: UNDER REVIEW — SM120 may lack native FP8 GEMM kernels, AWQ/BF16 could be faster
-- **max_model_len=512**: Reduced from 1024; max prompt+response is ~350 tokens, safe margin
-- **N-gram spec decode over Eagle/draft model**: No extra model needed, works in V1, low risk
-- **3 speculative tokens**: Balance between acceptance rate and overhead for short prompts
-- **disable_logprobs=False**: Critical — default True silently drops logprobs
-- **Pin vllm==0.8.5.post1 + transformers<4.53.0**: Latest versions have breaking changes
+- **Inflight dedup barely fires** — duplicates are median 7,858 positions apart, only 12 within 128-window
+- **Spec decode HURTS at 128 concurrency** — verification overhead scales superlinearly with batch size
+- **FP8 BROKEN on SM120 in vLLM 0.8.5.post1** — CUTLASS kernels added July 2025
+- **77% potential cache hit rate** with keyword similarity (Jaccard >= 0.65)
+- **75% of queries are "safe" for semantic caching** (generic, no entity dependencies)
+- **V0+multi-step beats V1 by 4-5%** on A100 PCIe
+- On A100, FP8/BF16/AWQ all give ~28-29 req/s — bandwidth-bound regardless
 
 ## Dead Ends
-
-- Session-aware scheduler — benchmark has no multi-turn sessions
-- Session-TTL KV eviction — same reason
-- Semantic/fuzzy caching — risks perplexity degradation for uncertain hit rate improvement
-- enforce_eager — loses 8x throughput on Blackwell
-- num_scheduler_steps — V0-only, V1 already does async scheduling natively
-
-## RTX 5080 Benchmark Matrix (RunPod, $15 credits)
-
-Run these in order. Each run: start fresh pod, run full 13435-request benchmark at concurrency 128.
-
-| Run | Quantization | max_num_seqs | max_batched_tokens | Other Changes | Hypothesis |
-|-----|-------------|-------------|-------------------|---------------|-----------|
-| A | FP8 (current) | 256 | 8192 | baseline on 5080 | Establish 5080 baseline |
-| B | None (BF16) | 160 | 8192 | QUANTIZATION="" | BF16 may beat FP8 on SM120 |
-| C | FP8 | 256 | 16384 | larger batches | Better throughput for small model |
-| D | Best of A/B/C | best | best | cudagraph_mode=FULL | Full CUDA graphs for small model |
-| E | Best so far | best | best | all combined | Final best config |
-
-All configs via env vars — no rebuild needed between runs.
+- Spec decode at 128 concurrency — proven harmful by multiple papers
+- FP8 on SM120 with vLLM 0.8.5.post1 — CUTLASS kernels not present
+- Reducing max_num_seqs — didn't help (cache handles load)
+- max_num_batched_tokens tuning — marginal on A100 (already tested 8192/16384)
+- KV cache compression (H2O/SnapKV) — only helps for >4K token sequences
+- HTTP-level request batching — vLLM continuous batching already optimal
 
 ## Next Steps
 
-1. ~~Add Blackwell env vars to Dockerfile~~ ✅ Done
-2. ~~Set swap_space=0~~ ✅ Done
-3. Build & push Docker image to GHCR
-4. Deploy on RunPod RTX 5080
-5. Run benchmark matrix A→E
-6. Pick best config, final Docker image push for submission
+1. **Test semantic cache** with conservative thresholds (0.80 keyword, 0.90 embedding) on A100
+2. **Validate perplexity** — compare per-request distribution with and without semantic cache
+3. **Tune thresholds** — find the sweet spot that maximizes hits without degrading quality
+4. **Test on actual RTX 5080** — deploy to Vast.ai, run benchmark matrix
+5. **Consider vLLM upgrade** if BF16 on 5080 can't sustain 128 concurrent sequences
