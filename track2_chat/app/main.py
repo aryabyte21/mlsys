@@ -19,6 +19,14 @@ cache = ResponseCache(max_size=CACHE_MAX_SIZE)
 
 async def _init_engine():
     try:
+        # Pre-warm the embedding model (CPU) while GPU loads
+        if SEMANTIC_CACHE_ENABLED:
+            logger.info("Pre-warming embedding model...")
+            cache._get_embedder()
+            # Warm the encode path with a dummy query
+            cache._embed_text("warmup query")
+            logger.info("Embedding model ready!")
+
         await engine.initialize()
         # Warmup: prime CUDA graphs, prefix cache, and JIT
         logger.info("Sending warmup request...")
@@ -61,11 +69,14 @@ async def chat_completions(request: ChatRequest):
     if cached is not None:
         return cached
 
-    # Layer 2: semantic cache (keyword + embedding similarity)
+    # Layer 2: semantic cache — keyword match is inline (fast), embedding in thread pool
     if SEMANTIC_CACHE_ENABLED and request.temperature == 0:
-        semantic_cached = await cache.semantic_get_async(request.messages)
+        # Fast path: keyword-only (no thread pool, no blocking)
+        semantic_cached = cache.semantic_get_keyword_only(request.messages)
+        if semantic_cached is None:
+            # Slow path: embedding search in thread pool
+            semantic_cached = await cache.semantic_get_async(request.messages)
         if semantic_cached is not None:
-            # Store under exact key too so future identical requests are instant
             cache.complete_inflight_by_key(cache_key, semantic_cached)
             return semantic_cached
 
