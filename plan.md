@@ -118,7 +118,9 @@ Incoming Request (conc. 128)
 
 ## Speculative decoding
 - Use a smaller model to generate candidate tokens (will gave to test with the smaller model which works in our favour)
-- 
+- Adaptive Speculative decoding: We try this idea where k for draft model will be dynamic and will be decided on the fly based on the acceptance rate of the previous tokens.
+- Draft Temperature Optimzation: the acceptance depends on u = p/q probability so we can try to optimize the temperature of the draft model to maximize the acceptance rate.
+- Multi Modal Speculative decoding: Over here we use 2 intermediate model maybe first can be 0.5B then 1.5B and then 4B but this is an overkill for the size of output we have.
 
 ## Decisions
 
