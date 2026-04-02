@@ -104,6 +104,8 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A11 | 2026-04-03 | FULL: keyword-only V0+steps10 | **9** | 16821 | **153.88** | **1.1994** | **NEW BEST** 5.3x over baseline! |
 | Q7 | 2026-04-03 | Quick: + no prefix caching | 20 | 10533 | 41.30 | 1.2000 | marginal +2.6% |
 | Q8 | 2026-04-03 | Quick: + max_batched=16384 | 22 | 11055 | 40.75 | 1.2000 | neutral, reverted |
+| Q9 | 2026-04-03 | Quick: template var stripping | 22 | 10890 | 39.58 | 1.2005 | reverted |
+| A12 | 2026-04-03 | FULL: template var stripping | 10 | 15511 | 142.90 | 1.2006 | worse than A11, reverted |
 
 ## Discoveries & Surprises
 
