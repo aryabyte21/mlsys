@@ -95,6 +95,11 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A8 | 2026-04-03 | V0+steps10+semantic (0.55/0.75/0.85) | 329 | 24619 | 51.20 | 1.2011 | best throughput but P99 bad |
 | A9 | 2026-04-03 | V1+semantic (0.55/0.75/0.85) | 3145 | 8763 | 48.40 | 1.1959 | best P99 with semantic |
 | A10 | 2026-04-03 | V0+steps10+semantic (0.45/0.60/0.75)+prewarm+kw-first FULL | **7** | 18137 | **68.01** | 1.2051 | **NEW BEST** 134% over baseline |
+| Q1 | 2026-04-03 | Quick: baseline semantic (0.55/0.75/0.85) V0+steps10 | 610 | 24534 | 30.18 | 1.1985 | quick baseline |
+| Q2 | 2026-04-03 | Quick: aggressive (0.45/0.60/0.75) | 1842 | 25083 | 39.46 | 1.1879 | +31% over Q1 |
+| Q3 | 2026-04-03 | Quick: + prewarm + 8 workers | 647 | 44697 | 34.13 | 1.1970 | 8 workers hurt P99 |
+| Q4 | 2026-04-03 | Quick: + keyword-first + 4 workers | 825 | 25067 | 39.75 | 1.1957 | KEEP |
+| Q5 | 2026-04-03 | Quick: + normalize hash + max_len=320 | 1244 | 26369 | 39.74 | 1.2005 | neutral, good for 5080 |
 
 ## Discoveries & Surprises
 
