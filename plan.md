@@ -121,8 +121,29 @@ Incoming Request (conc. 128)
 | 4 | 2026-03-21 | V1 + FP8 on H200 | 1140 | 2579 | 116.11 | 1.2009 | works, ~6% throughput gain |
 | 5 | 2026-03-21 | V1 + FP8 on H200 (repeat) | 1142 | 2574 | 116.29 | 1.2009 | confirmed stable, all passed |
 | 6 | — | Full stack on RTX 5080 (Docker) | — | — | — | — | pending |
+| A1 | 2026-04-03 | V1+FP8+gpu0.4 on A100 PCIe | 4636 | 9484 | 28.50 | 1.2006 | A100 baseline — FP8 uses Marlin (no native FP8 on Ampere) |
+| A2 | 2026-04-03 | V1+BF16+gpu0.95 on A100 PCIe | 4756 | 9745 | 27.95 | 1.1990 | FP8≈BF16 on A100, bandwidth-bound |
+| A3 | 2026-04-03 | V0+BF16+steps10+uvloop on A100 | 4641 | 9168 | 29.05 | 1.1996 | +4% vs V1, P99 -6% |
+| A4 | 2026-04-03 | V0+FP8+steps10+uvloop on A100 | 4571 | 9350 | 29.25 | 1.2010 | marginal FP8 win |
+| A5 | 2026-04-03 | V0+AWQ+steps10+uvloop on A100 | 5029 | 9281 | 28.01 | 1.2050 | AWQ dequant overhead, worst perplexity |
+| A6 | 2026-04-03 | V1+BF16+max320+seqs128 on A100 | 4685 | 9534 | 28.34 | 1.1997 | reducing seqs/max_len didn't help |
+| A7 | 2026-04-03 | V1+BF16+semantic(kw=0.65,emb=0.82) on A100 | 2667 | 11417 | 40.32 | 1.2004 | **+44% throughput**, P50 halved |
+| A8 | 2026-04-03 | V0+steps10+semantic(kw=0.65,emb=0.82) on A100 | 122 | 26335 | 51.20 | 1.2011 | **+83%**, amazing P50, terrible P99 |
+| A9 | 2026-04-03 | V1+semantic(kw=0.55,emb=0.75) on A100 | 3145 | 8763 | 48.40 | 1.1959 | **best P99**, perplexity improved! |
+| A10 | 2026-04-03 | V0+steps10+semantic(kw=0.55,emb=0.75) on A100 | 1051 | 21511 | 60.46 | 1.2030 | **BEST throughput 2.1x baseline** |
 
-## Discoveries & Surprises
+## Discoveries & Surprises (2026-04-03 A100 session)
+
+- **Semantic caching is the single biggest optimization** — 44-116% throughput improvement
+- **V0+multi-step compounds with semantic cache** — 29→60 req/s (2.1x)
+- **Lower semantic thresholds (0.55/0.75) don't hurt perplexity** — 1.1959 is BETTER than baseline
+- **V0 gives higher throughput but worse P99** — V1 gives better P99 due to torch.compile
+- **FP8 uses Marlin weight-only on A100** — no native FP8 compute (Ampere SM80)
+- **All quantization methods give ~28-29 req/s raw** on A100 PCIe — bandwidth-bound
+- **Spec decode HURTS at 128 concurrency** (papers: EXSpec ICLR'26, MagicDec ICLR'25)
+- **FP8 BROKEN on SM120 in vLLM 0.8.5.post1** — CUTLASS kernels added July 2025
+
+## Discoveries & Surprises (Original)
 
 - **36.1% duplicate rate** in training data — exact-match caching is extremely high impact
 - **Benchmark is single-turn** (not multi-turn) — session-based optimizations irrelevant
