@@ -91,7 +91,10 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A4 | 2026-04-02 | V0+FP8+steps10+uvloop on A100 | 4571 | 9350 | 29.25 | 1.2010 | best raw throughput |
 | A5 | 2026-04-02 | V0+AWQ+steps10+uvloop on A100 | 5029 | 9281 | 28.01 | 1.2050 | AWQ dequant overhead |
 | A6 | 2026-04-02 | V1+BF16+max320+seqs128 on A100 | 4685 | 9534 | 28.34 | 1.1997 | reducing seqs didn't help |
-| A7 | pending | V1+BF16+semantic_cache on A100 | — | — | — | — | testing now |
+| A7 | 2026-04-03 | V1+BF16+semantic (0.65/0.82/0.92) | 2667 | 11417 | 40.32 | 1.2004 | semantic cache works! +44% |
+| A8 | 2026-04-03 | V0+steps10+semantic (0.55/0.75/0.85) | 329 | 24619 | 51.20 | 1.2011 | best throughput but P99 bad |
+| A9 | 2026-04-03 | V1+semantic (0.55/0.75/0.85) | 3145 | 8763 | 48.40 | 1.1959 | best P99 with semantic |
+| A10 | 2026-04-03 | V0+steps10+semantic (0.45/0.60/0.75)+prewarm+kw-first FULL | **7** | 18137 | **68.01** | 1.2051 | **NEW BEST** 134% over baseline |
 
 ## Discoveries & Surprises
 
