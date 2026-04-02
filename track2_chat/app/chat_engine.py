@@ -55,8 +55,11 @@ class ChatEngine:
             max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
             max_num_seqs=MAX_NUM_SEQS,
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
-            speculative_model=SPECULATIVE_MODEL_NAME,
-            num_speculative_tokens=NUM_SPECULATIVE_TOKENS,
+            speculative_config={
+                "model": SPECULATIVE_MODEL_NAME,
+                "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
+                "method": "draft_model",
+            },
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
