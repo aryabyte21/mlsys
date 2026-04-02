@@ -238,8 +238,10 @@ class ResponseCache:
     # ── Store with semantic indexing ──
 
     def _index_entry(self, key: str, query_text: str):
-        """Add keywords and embedding to semantic indices."""
+        """Add keywords to semantic index. Embedding indexing skipped for speed."""
         self._key_keywords[key] = extract_keywords(query_text)
+        # Skip embedding indexing — keyword-only mode is faster
+        return
 
         embedding = self._embed_text(query_text)
         self._init_faiss(len(embedding))

@@ -100,6 +100,8 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | Q3 | 2026-04-03 | Quick: + prewarm + 8 workers | 647 | 44697 | 34.13 | 1.1970 | 8 workers hurt P99 |
 | Q4 | 2026-04-03 | Quick: + keyword-first + 4 workers | 825 | 25067 | 39.75 | 1.1957 | KEEP |
 | Q5 | 2026-04-03 | Quick: + normalize hash + max_len=320 | 1244 | 26369 | 39.74 | 1.2005 | neutral, good for 5080 |
+| Q6 | 2026-04-03 | Quick: keyword-only (no embeddings) | 22 | 11137 | 40.25 | 1.1992 | P99 halved! P50=22ms |
+| A11 | 2026-04-03 | FULL: keyword-only V0+steps10 | **9** | 16821 | **153.88** | **1.1994** | **NEW BEST** 5.3x over baseline! |
 
 ## Discoveries & Surprises
 
