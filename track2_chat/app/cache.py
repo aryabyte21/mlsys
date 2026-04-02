@@ -31,9 +31,9 @@ class ResponseCache:
     def __init__(
         self,
         max_size: int = 16384,
-        keyword_threshold: float = 0.55,
-        semantic_threshold: float = 0.75,
-        hard_stop: float = 0.85,
+        keyword_threshold: float = 0.45,
+        semantic_threshold: float = 0.60,
+        hard_stop: float = 0.75,
     ):
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
@@ -204,12 +204,20 @@ class ResponseCache:
 
         query = messages[-1].content
 
+        # Try fast keyword search first
         result = self._keyword_search(query)
         if result is not None:
             return result
 
+        # Fall back to embedding search
         result = self._embedding_search(query)
         return result
+
+    def semantic_get_keyword_only(self, messages: list[ChatMessage]) -> dict | None:
+        """Fast keyword-only semantic search (no embeddings, no thread pool)."""
+        if not self._cache:
+            return None
+        return self._keyword_search(messages[-1].content)
 
     async def semantic_get_async(self, messages: list[ChatMessage]) -> dict | None:
         """Non-blocking version that runs full semantic search in thread pool."""
