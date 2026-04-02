@@ -8,8 +8,10 @@ engine = ChatEngine()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Start the engine initialization in the background
-    asyncio.create_task(engine.initialize())
+    # Startup: Block the server from starting until the model is 100% loaded
+    print("Waiting for vLLM to fully load models into GPU... (This may take a few minutes)")
+    await engine.initialize()
+    print("Models loaded! Starting the web server...")
     yield
     # Shutdown: Clean up resources if needed
     pass
