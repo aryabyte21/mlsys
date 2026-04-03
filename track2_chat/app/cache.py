@@ -3,37 +3,27 @@ import hashlib
 import logging
 import struct
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
-
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from app.normalize import extract_keywords
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
 
-# Shared thread pool for CPU-bound embedding work
-_embed_pool = ThreadPoolExecutor(max_workers=4)
-
 
 class ResponseCache:
-    """Multi-layer response cache with semantic matching.
+    """Multi-layer response cache with keyword matching.
 
     Layers (checked in order):
-    1. Exact-match — SHA256 hash of request (instant, lossless)
-    2. Inflight dedup — coalesce concurrent identical requests
-    3. Keyword similarity — Jaccard similarity of extracted keywords
-    4. Embedding similarity — FAISS cosine search with MiniLM embeddings
+    1. Exact-match — SHA256 hash of normalized request
+    2. Keyword similarity — Jaccard similarity via inverted index
+    3. Inflight dedup — coalesce concurrent identical requests
     """
 
     def __init__(
         self,
         max_size: int = 16384,
-        keyword_threshold: float = 0.45,
-        semantic_threshold: float = 0.60,
-        hard_stop: float = 0.75,
+        keyword_threshold: float = 0.40,
+        hard_stop: float = 0.70,
     ):
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
@@ -43,40 +33,17 @@ class ResponseCache:
         self.hits = 0
         self.misses = 0
         self.dedup_hits = 0
-        self.semantic_hits = 0
         self.keyword_hits = 0
 
-        # Semantic cache config
+        # Keyword thresholds
         self._keyword_threshold = keyword_threshold
-        self._semantic_threshold = semantic_threshold
         self._hard_stop = hard_stop
 
-        # Keyword index: cache_key -> set of keywords
-        self._key_keywords: dict[str, set[str]] = {}
+        # Keyword index: cache_key -> frozenset of keywords
+        self._key_keywords: dict[str, frozenset[str]] = {}
 
-        # FAISS embedding index
-        self._embedder: SentenceTransformer | None = None
-        self._faiss_index: faiss.IndexIDMap | None = None
-        self._id_to_key: dict[int, str] = {}
-        self._key_to_id: dict[str, int] = {}
-        self._id_counter = 0
-
-    def _get_embedder(self) -> SentenceTransformer:
-        if self._embedder is None:
-            self._embedder = SentenceTransformer(
-                "all-MiniLM-L6-v2", device="cpu"
-            )
-        return self._embedder
-
-    def _embed_text(self, text: str) -> np.ndarray:
-        model = self._get_embedder()
-        emb = model.encode(text, normalize_embeddings=True)
-        return np.array(emb, dtype="float32")
-
-    def _init_faiss(self, dim: int):
-        if self._faiss_index is None:
-            base = faiss.IndexFlatIP(dim)
-            self._faiss_index = faiss.IndexIDMap(base)
+        # Inverted index: keyword -> set of cache_keys (for O(1) candidate lookup)
+        self._inverted: dict[str, set[str]] = {}
 
     # ── Exact-match layer ──
 
@@ -93,7 +60,6 @@ class ResponseCache:
 
         for message in messages:
             role_bytes = message.role.encode("utf-8")
-            # Normalize content for more exact-match hits
             content_bytes = message.content.lower().strip().encode("utf-8")
             hasher.update(struct.pack("<I", len(role_bytes)))
             hasher.update(role_bytes)
@@ -123,27 +89,33 @@ class ResponseCache:
         self._inflight[key] = future
         return future, True
 
-    # ── Keyword similarity layer ──
+    # ── Keyword similarity layer (with inverted index) ──
 
     def _keyword_search(self, query: str) -> dict | None:
         query_keywords = extract_keywords(query)
         if not query_keywords:
             return None
 
+        # Use inverted index to find candidate cache entries
+        # Only entries sharing at least one keyword are candidates
+        candidates: dict[str, set[str]] = {}
+        for kw in query_keywords:
+            for key in self._inverted.get(kw, ()):
+                if key not in candidates:
+                    candidates[key] = self._key_keywords[key]
+
+        if not candidates:
+            return None
+
         best_key = None
         best_score = 0.0
+        hard_stop = self._hard_stop
 
-        for key, item_keywords in self._key_keywords.items():
-            if not item_keywords:
-                continue
-
+        for key, item_keywords in candidates.items():
             intersection = query_keywords & item_keywords
-            if not intersection:
-                continue
-
             score = len(intersection) / len(query_keywords | item_keywords)
 
-            if score >= self._hard_stop:
+            if score >= hard_stop:
                 self._cache.move_to_end(key)
                 self.keyword_hits += 1
                 return self._cache[key]
@@ -159,118 +131,35 @@ class ResponseCache:
 
         return None
 
-    # ── Embedding similarity layer ──
-
-    def _embedding_search(self, query: str, top_k: int = 3) -> dict | None:
-        if self._faiss_index is None or self._faiss_index.ntotal == 0:
-            return None
-
-        query_emb = self._embed_text(query)
-        query_emb = np.expand_dims(query_emb, axis=0)
-
-        scores, indices = self._faiss_index.search(query_emb, top_k)
-
-        best_score = -1.0
-        best_key = None
-
-        for score, faiss_id in zip(scores[0], indices[0]):
-            if faiss_id == -1:
-                continue
-
-            key = self._id_to_key.get(int(faiss_id))
-            if key is None or key not in self._cache:
-                continue
-
-            if score >= self._hard_stop:
-                self._cache.move_to_end(key)
-                self.semantic_hits += 1
-                return self._cache[key]
-
-            if score > best_score:
-                best_score = score
-                best_key = key
-
-        if best_score >= self._semantic_threshold and best_key is not None:
-            self._cache.move_to_end(best_key)
-            self.semantic_hits += 1
-            return self._cache[best_key]
-
-        return None
-
-    # ── Combined semantic lookup (keyword → embedding) ──
-
-    def semantic_get(self, messages: list[ChatMessage]) -> dict | None:
-        if not self._cache:
-            return None
-
-        query = messages[-1].content
-
-        # Try fast keyword search first
-        result = self._keyword_search(query)
-        if result is not None:
-            return result
-
-        # Fall back to embedding search
-        result = self._embedding_search(query)
-        return result
-
     def semantic_get_keyword_only(self, messages: list[ChatMessage]) -> dict | None:
-        """Fast keyword-only semantic search (no embeddings, no thread pool)."""
+        """Fast keyword-only semantic search via inverted index."""
         if not self._cache:
             return None
         return self._keyword_search(messages[-1].content)
 
-    async def semantic_get_async(self, messages: list[ChatMessage]) -> dict | None:
-        """Non-blocking version that runs full semantic search in thread pool."""
-        if not self._cache:
-            return None
-
-        query = messages[-1].content
-
-        # Run entire semantic search (keyword + embedding) in thread pool
-        # to avoid blocking the event loop
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            _embed_pool, self.semantic_get, messages
-        )
-        return result
-
-    # ── Store with semantic indexing ──
+    # ── Store with indexing ──
 
     def _index_entry(self, key: str, query_text: str):
-        """Add keywords to semantic index. Embedding indexing skipped for speed."""
-        self._key_keywords[key] = extract_keywords(query_text)
-        # Skip embedding indexing — keyword-only mode is faster
-        return
-
-        embedding = self._embed_text(query_text)
-        self._init_faiss(len(embedding))
-
-        if key in self._key_to_id:
-            faiss_id = self._key_to_id[key]
-        else:
-            faiss_id = self._id_counter
-            self._id_counter += 1
-            self._key_to_id[key] = faiss_id
-            self._id_to_key[faiss_id] = key
-
-        self._faiss_index.add_with_ids(
-            np.expand_dims(embedding, axis=0),
-            np.array([faiss_id], dtype="int64"),
-        )
+        """Add keywords to inverted index."""
+        keywords = frozenset(extract_keywords(query_text))
+        self._key_keywords[key] = keywords
+        for kw in keywords:
+            if kw not in self._inverted:
+                self._inverted[kw] = set()
+            self._inverted[kw].add(key)
 
     def _evict_oldest(self):
         if len(self._cache) <= self._max_size:
             return
 
         old_key, _ = self._cache.popitem(last=False)
-        self._key_keywords.pop(old_key, None)
-
-        old_id = self._key_to_id.pop(old_key, None)
-        if old_id is not None:
-            self._id_to_key.pop(old_id, None)
-            if self._faiss_index is not None:
-                self._faiss_index.remove_ids(np.array([old_id], dtype="int64"))
+        old_keywords = self._key_keywords.pop(old_key, frozenset())
+        for kw in old_keywords:
+            bucket = self._inverted.get(kw)
+            if bucket is not None:
+                bucket.discard(old_key)
+                if not bucket:
+                    del self._inverted[kw]
 
     # ── Inflight + store operations ──
 
@@ -280,12 +169,12 @@ class ResponseCache:
         self._cache[key] = response
         self._evict_oldest()
 
-        # Resolve inflight waiters FIRST (don't block on indexing)
+        # Resolve inflight waiters FIRST
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
             future.set_result(response)
 
-        # Index for semantic search (blocking but fast enough)
+        # Index for keyword search
         if query_text is not None:
             try:
                 self._index_entry(key, query_text)
@@ -298,12 +187,11 @@ class ResponseCache:
             future.set_exception(error)
 
     def log_stats(self):
-        total = self.hits + self.misses + self.dedup_hits + self.semantic_hits + self.keyword_hits
+        total = self.hits + self.misses + self.dedup_hits + self.keyword_hits
         logger.info(
-            "Cache stats: exact=%d, keyword=%d, semantic=%d, dedup=%d, miss=%d, total=%d, "
-            "cache_size=%d, faiss_size=%d",
-            self.hits, self.keyword_hits, self.semantic_hits,
+            "Cache stats: exact=%d, keyword=%d, dedup=%d, miss=%d, total=%d, "
+            "cache_size=%d, inverted_keys=%d",
+            self.hits, self.keyword_hits,
             self.dedup_hits, self.misses, total,
-            len(self._cache),
-            self._faiss_index.ntotal if self._faiss_index else 0,
+            len(self._cache), len(self._inverted),
         )

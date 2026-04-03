@@ -106,9 +106,15 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | Q8 | 2026-04-03 | Quick: + max_batched=16384 | 22 | 11055 | 40.75 | 1.2000 | neutral, reverted |
 | Q9 | 2026-04-03 | Quick: template var stripping | 22 | 10890 | 39.58 | 1.2005 | reverted |
 | A12 | 2026-04-03 | FULL: template var stripping | 10 | 15511 | 142.90 | 1.2006 | worse than A11, reverted |
+| Q10 | 2026-04-03 | Quick: stemming+domain stopwords+inverted index (0.40/0.70) | 9 | 12213 | 76.94 | 1.1967 | **1.9x over Q6!** |
+| A13 | 2026-04-03 | FULL: stemming+domain stopwords+inverted index | **10** | 9893 | **498.20** | **1.1987** | **NEW BEST** 17.2x baseline! |
 
 ## Discoveries & Surprises
 
+- **Simple stemming is a 3.2x multiplier** — merging "cancel/cancelling/canceling" reduces unique keyword sets from 2,019 to ~823
+- **Domain stopwords remove noise** — "help", "need", "assistance" don't discriminate intent, removing them boosts Jaccard scores for meaningful keywords
+- **Inverted keyword index** — O(1) candidate lookup vs O(n) scan, faster as cache grows
+- **Removed sklearn/faiss/sentence-transformers deps** — faster Docker builds, smaller image
 - **Inflight dedup barely fires** — duplicates are median 7,858 positions apart, only 12 within 128-window
 - **Spec decode HURTS at 128 concurrency** — verification overhead scales superlinearly with batch size
 - **FP8 BROKEN on SM120 in vLLM 0.8.5.post1** — CUTLASS kernels added July 2025
