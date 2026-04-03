@@ -86,7 +86,7 @@ class ChatEngine:
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
-            enforce_eager=False,  # Must be False to enable torch.compile
+            enforce_eager=ENFORCE_EAGER,
         )
         # Optional params that differ across vLLM versions
         optional = {
@@ -94,11 +94,6 @@ class ChatEngine:
             "swap_space": SWAP_SPACE,
             "num_scheduler_steps": NUM_SCHEDULER_STEPS,
             "speculative_config": speculative_config,
-            # torch.compile with Inductor (kernel fusion) but NO CUDA graphs (saves VRAM)
-            "compilation_config": {
-                "mode": 3,            # Inductor + custom passes
-                "cudagraph_mode": 0,  # NONE — no CUDA graphs, no OOM
-            },
         }
         for key, val in optional.items():
             if key in valid_params:
