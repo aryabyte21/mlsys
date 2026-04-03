@@ -21,14 +21,16 @@ EXPOSE 8000
 # GPU libraries
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# vLLM optimizations for RTX 5080 (16GB VRAM)
+# vLLM optimizations for RTX 5080 (16GB VRAM, SM120)
 ENV VLLM_USE_V1=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ENV VLLM_NO_USAGE_STATS=1
 ENV CUDA_MODULE_LOADING=LAZY
 ENV QUANTIZATION=""
 ENV ENABLE_PREFIX_CACHING=false
-ENV ENFORCE_EAGER=true
-ENV GPU_MEMORY_UTILIZATION=0.4
+# CUDA graphs are 8x faster than enforce_eager on SM120 consumer GPUs
+# At gpu=0.95 on 16GB, model(8GB)+graphs(1GB) leaves ~6GB for KV cache = ~137 seqs > 128 target
+ENV ENFORCE_EAGER=false
+ENV GPU_MEMORY_UTILIZATION=0.95
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--loop", "uvloop"]
