@@ -89,7 +89,7 @@ class ChatEngine:
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-        self.tokenizer = self.engine.get_tokenizer()
+        self.tokenizer = await self.engine.get_tokenizer()
 
         # Probe once whether the tokenizer supports enable_thinking
         try:
