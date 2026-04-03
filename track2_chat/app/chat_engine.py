@@ -89,7 +89,11 @@ class ChatEngine:
         )
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-        self.tokenizer = await self.engine.get_tokenizer()
+        # Handle both sync (vLLM 0.8.x) and async (vLLM 0.9.x) get_tokenizer
+        tokenizer = self.engine.get_tokenizer()
+        if hasattr(tokenizer, '__await__'):
+            tokenizer = await tokenizer
+        self.tokenizer = tokenizer
 
         # Probe once whether the tokenizer supports enable_thinking
         try:

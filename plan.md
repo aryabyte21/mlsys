@@ -121,12 +121,17 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A23 | 2026-04-03 | FINAL: kw=0.30 + tri=0.35 (no synonyms) | **6** | **9538** | **337.29** | **1.1945** | **BEST** 11.8x baseline |
 | A16 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.95 | 5 | 9733 | 225.24 | 1.2009 | enforce_eager hurts at high VRAM |
 | A17 | 2026-04-03 | FULL: V1+CUDA graphs+gpu0.4 | 4 | 8935 | 253.84 | 1.1992 | CUDA graphs eat KV cache at low VRAM |
+| **RTX 5080 RESULTS** | | | | | | | |
+| 5080-main | 2026-04-03 | Baseline (main branch) on RTX 5080 | 6687 | 9054 | 18.15 | 1.1997 | 429 failures! |
+| 5080-arya2 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, no FLASH_ATTN) | **29** | **10483** | **300.81** | **1.1968** | **16.6x baseline, 0 failures** |
 
 ## Discoveries & Surprises
 
 - **V1 beats V0 at high cache hit rates** — with 93%+ cache hits, V0's multi-step scheduling overhead hurts; V1's simpler path is 40% faster
-- **enforce_eager vs CUDA graphs depends on VRAM** — at gpu=0.4 (constrained), enforce_eager=True wins 2.4x; at gpu=0.95 (abundant), CUDA graphs win 3x
-- **For RTX 5080 (16GB)**: enforce_eager=True is critical — CUDA graphs eat KV cache room on constrained VRAM
+- **enforce_eager=True on RTX 5080** — confirmed 300 req/s vs 84 req/s with broken FLASH_ATTN
+- **FLASH_ATTN is BROKEN on SM120** — must use FLASHINFER or let vLLM auto-detect
+- **CRITICAL: Grading uses VALIDATION data (unseen queries)** — cache only helps for duplicates/similar queries within the validation set, not training data
+- **Grading metrics: P50, P95, throughput, perplexity** — P95 not P99
 - **Simple stemming is a 3.2x multiplier** — merging "cancel/cancelling/canceling" reduces unique keyword sets from 2,019 to ~823
 - **Domain stopwords remove noise** — "help", "need", "assistance" don't discriminate intent, removing them boosts Jaccard scores for meaningful keywords
 - **Inverted keyword index** — O(1) candidate lookup vs O(n) scan, faster as cache grows
