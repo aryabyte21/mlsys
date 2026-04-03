@@ -112,7 +112,8 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | Q12 | 2026-04-03 | Quick: V1 engine + stemming | **5** | 8994 | **85.61** | 1.1993 | V1 beats V0 now! |
 | A14 | 2026-04-03 | FULL: V1 engine + stemming+inverted index | **9** | **6221** | **697.23** | **1.1996** | 24.5x baseline |
 | Q13 | 2026-04-03 | Quick: V1+enforce_eager+gpu0.4 | **5** | 9925 | 76.01 | 1.1980 | works at 0.4 GPU |
-| A15 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.4 | **8** | 7315 | **599.63** | 1.1992 | 21x baseline, 5080-ready |
+| A15 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.4 | **8** | 7315 | **599.63** | 1.1992 | 21x baseline (warm cache) |
+| A18 | 2026-04-03 | DEFINITIVE cold-cache V1+eager+gpu0.4 (MIG) | **4** | 10495 | **209.65** | 1.1984 | Reproducible 5080-sim baseline |
 | A16 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.95 | 5 | 9733 | 225.24 | 1.2009 | enforce_eager hurts at high VRAM |
 | A17 | 2026-04-03 | FULL: V1+CUDA graphs+gpu0.4 | 4 | 8935 | 253.84 | 1.1992 | CUDA graphs eat KV cache at low VRAM |
 
