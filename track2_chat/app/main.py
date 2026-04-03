@@ -68,14 +68,27 @@ async def chat_completions(request: ChatRequest):
             cache.complete_inflight_by_key(cache_key, semantic_cached)
             return semantic_cached
 
-    # Layer 3: claim or join inflight computation
+    # Layer 3: semantic inflight dedup — join a similar in-progress GPU request
+    if SEMANTIC_CACHE_ENABLED and request.temperature == 0:
+        similar_inflight = cache.find_similar_inflight(request.messages[-1].content)
+        if similar_inflight is not None:
+            result = await similar_inflight
+            cache.complete_inflight_by_key(cache_key, result)
+            return result
+
+    # Layer 4: claim or join exact inflight computation
     inflight, is_owner = cache.claim_inflight_by_key(cache_key)
     if not is_owner:
         return await inflight
 
+    # Track keywords of this inflight request for semantic inflight dedup
+    query_text = request.messages[-1].content if SEMANTIC_CACHE_ENABLED else None
+    if query_text:
+        from app.normalize import extract_keywords
+        cache._inflight_keywords[cache_key] = frozenset(extract_keywords(query_text))
+
     try:
         response = await engine.generate(request)
-        query_text = request.messages[-1].content if SEMANTIC_CACHE_ENABLED else None
         cache.complete_inflight_by_key(cache_key, response, query_text=query_text)
         return response
     except Exception as e:
