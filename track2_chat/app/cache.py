@@ -42,6 +42,8 @@ class ResponseCache:
 
         # Keyword index: cache_key -> frozenset of keywords
         self._key_keywords: dict[str, frozenset[str]] = {}
+        # Inflight keyword tracking for semantic inflight dedup
+        self._inflight_keywords: dict[str, frozenset[str]] = {}
 
         # Inverted index: keyword -> set of cache_keys (for O(1) candidate lookup)
         self._inverted: dict[str, set[str]] = {}
@@ -92,6 +94,49 @@ class ResponseCache:
         future = asyncio.get_running_loop().create_future()
         self._inflight[key] = future
         return future, True
+
+    # ── Semantic inflight dedup ──
+
+    def find_similar_inflight(self, query: str) -> asyncio.Future[dict] | None:
+        """Find an inflight GPU request with similar keywords."""
+        query_kw = frozenset(extract_keywords(query))
+        if not query_kw or not self._inflight_keywords:
+            return None
+
+        for key, item_kw in self._inflight_keywords.items():
+            if not item_kw:
+                continue
+            inter = query_kw & item_kw
+            if not inter:
+                continue
+            score = len(inter) / len(query_kw | item_kw)
+            if score >= self._keyword_threshold:
+                future = self._inflight.get(key)
+                if future is not None:
+                    self.dedup_hits += 1
+                    return future
+        return None
+
+    def complete_inflight_by_key(
+        self, key: str, response: dict, query_text: str | None = None
+    ) -> None:
+        self._cache[key] = response
+        self._evict_oldest()
+
+        # Resolve inflight waiters FIRST
+        future = self._inflight.pop(key, None)
+        if future is not None and not future.done():
+            future.set_result(response)
+
+        # Clean up inflight keywords
+        self._inflight_keywords.pop(key, None)
+
+        # Index for keyword search
+        if query_text is not None:
+            try:
+                self._index_entry(key, query_text)
+            except Exception:
+                logger.debug("Failed to index entry for semantic cache", exc_info=True)
 
     # ── Keyword similarity layer (with inverted index) ──
 
@@ -206,25 +251,8 @@ class ResponseCache:
 
     # ── Inflight + store operations ──
 
-    def complete_inflight_by_key(
-        self, key: str, response: dict, query_text: str | None = None
-    ) -> None:
-        self._cache[key] = response
-        self._evict_oldest()
-
-        # Resolve inflight waiters FIRST
-        future = self._inflight.pop(key, None)
-        if future is not None and not future.done():
-            future.set_result(response)
-
-        # Index for keyword search
-        if query_text is not None:
-            try:
-                self._index_entry(key, query_text)
-            except Exception:
-                logger.debug("Failed to index entry for semantic cache", exc_info=True)
-
     def fail_inflight_by_key(self, key: str, error: Exception) -> None:
+        self._inflight_keywords.pop(key, None)
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
             future.set_exception(error)
