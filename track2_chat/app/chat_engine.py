@@ -94,10 +94,6 @@ class ChatEngine:
             "swap_space": SWAP_SPACE,
             "num_scheduler_steps": NUM_SCHEDULER_STEPS,
             "speculative_config": speculative_config,
-            # Throughput mode: larger CUDA graphs, aggressive batching
-            "performance_mode": "throughput",
-            # Max optimization level: best kernels, longer startup
-            "optimization_level": 3,
         }
         # Limited CUDA graphs: only capture small batch sizes (1-16)
         # With 97% cache hits, GPU rarely has >8 concurrent requests
