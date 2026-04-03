@@ -43,7 +43,7 @@ def simple_stem(word: str) -> str:
 
     cancel/cancelling/canceling → cancel
     orders/ordered → order
-    payments → payment
+    payments → pay
     """
     if len(word) <= 3:
         return word
