@@ -107,10 +107,14 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | Q9 | 2026-04-03 | Quick: template var stripping | 22 | 10890 | 39.58 | 1.2005 | reverted |
 | A12 | 2026-04-03 | FULL: template var stripping | 10 | 15511 | 142.90 | 1.2006 | worse than A11, reverted |
 | Q10 | 2026-04-03 | Quick: stemming+domain stopwords+inverted index (0.40/0.70) | 9 | 12213 | 76.94 | 1.1967 | **1.9x over Q6!** |
-| A13 | 2026-04-03 | FULL: stemming+domain stopwords+inverted index | **10** | 9893 | **498.20** | **1.1987** | **NEW BEST** 17.2x baseline! |
+| A13 | 2026-04-03 | FULL: stemming+domain stopwords+inverted index V0 | **10** | 9893 | **498.20** | **1.1987** | 17.2x baseline |
+| Q11 | 2026-04-03 | Quick: lower thresholds (0.35/0.65) V0 | 9 | 11524 | 75.86 | 1.1974 | worse, reverted to 0.40/0.70 |
+| Q12 | 2026-04-03 | Quick: V1 engine + stemming | **5** | 8994 | **85.61** | 1.1993 | V1 beats V0 now! |
+| A14 | 2026-04-03 | FULL: V1 engine + stemming+inverted index | **9** | **6221** | **697.23** | **1.1996** | **NEW BEST** 24.5x baseline! |
 
 ## Discoveries & Surprises
 
+- **V1 beats V0 at high cache hit rates** — with 93%+ cache hits, V0's multi-step scheduling overhead hurts; V1's simpler path is 40% faster
 - **Simple stemming is a 3.2x multiplier** — merging "cancel/cancelling/canceling" reduces unique keyword sets from 2,019 to ~823
 - **Domain stopwords remove noise** — "help", "need", "assistance" don't discriminate intent, removing them boosts Jaccard scores for meaningful keywords
 - **Inverted keyword index** — O(1) candidate lookup vs O(n) scan, faster as cache grows
