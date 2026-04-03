@@ -110,7 +110,9 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A13 | 2026-04-03 | FULL: stemming+domain stopwords+inverted index V0 | **10** | 9893 | **498.20** | **1.1987** | 17.2x baseline |
 | Q11 | 2026-04-03 | Quick: lower thresholds (0.35/0.65) V0 | 9 | 11524 | 75.86 | 1.1974 | worse, reverted to 0.40/0.70 |
 | Q12 | 2026-04-03 | Quick: V1 engine + stemming | **5** | 8994 | **85.61** | 1.1993 | V1 beats V0 now! |
-| A14 | 2026-04-03 | FULL: V1 engine + stemming+inverted index | **9** | **6221** | **697.23** | **1.1996** | **NEW BEST** 24.5x baseline! |
+| A14 | 2026-04-03 | FULL: V1 engine + stemming+inverted index | **9** | **6221** | **697.23** | **1.1996** | 24.5x baseline |
+| Q13 | 2026-04-03 | Quick: V1+enforce_eager+gpu0.4 | **5** | 9925 | 76.01 | 1.1980 | works at 0.4 GPU |
+| A15 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.4 | **8** | 7315 | **599.63** | 1.1992 | 21x baseline, 5080-ready |
 
 ## Discoveries & Surprises
 

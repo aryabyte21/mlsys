@@ -81,6 +81,7 @@ class ChatEngine:
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
+            enforce_eager=True,  # Skip CUDA graphs — faster startup, no graph overhead
             swap_space=SWAP_SPACE,
             num_scheduler_steps=NUM_SCHEDULER_STEPS,
             speculative_config=speculative_config,
