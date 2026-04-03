@@ -11,6 +11,7 @@ ENABLE_PREFIX_CACHING = os.getenv("ENABLE_PREFIX_CACHING", "false").lower() == "
 ENABLE_CHUNKED_PREFILL = os.getenv("ENABLE_CHUNKED_PREFILL", "true").lower() == "true"
 CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "16384"))
 SWAP_SPACE = int(os.getenv("SWAP_SPACE", "0"))  # V1 uses recomputation, not swap
+ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "true").lower() == "true"  # True saves VRAM for KV cache on 5080
 
 # Semantic cache
 SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true"

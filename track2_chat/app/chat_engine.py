@@ -6,6 +6,7 @@ from app.schemas import ChatRequest
 from app.constants import (
     ENABLE_CHUNKED_PREFILL,
     ENABLE_PREFIX_CACHING,
+    ENFORCE_EAGER,
     GPU_MEMORY_UTILIZATION,
     KV_CACHE_DTYPE,
     MAX_MODEL_LENGTH,
@@ -81,7 +82,7 @@ class ChatEngine:
             enable_prefix_caching=ENABLE_PREFIX_CACHING,
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
-            enforce_eager=True,  # CRITICAL: saves VRAM for KV cache (3x at gpu=0.4)
+            enforce_eager=ENFORCE_EAGER,
             swap_space=SWAP_SPACE,
             num_scheduler_steps=NUM_SCHEDULER_STEPS,
             speculative_config=speculative_config,
