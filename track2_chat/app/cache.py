@@ -22,8 +22,8 @@ class ResponseCache:
     def __init__(
         self,
         max_size: int = 16384,
-        keyword_threshold: float = 0.35,
-        hard_stop: float = 0.65,
+        keyword_threshold: float = 0.30,
+        hard_stop: float = 0.55,
     ):
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
