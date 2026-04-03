@@ -143,6 +143,13 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | 5080-B15 | 2026-04-03 | FULL(cold): FP8 weights seqs=192 gpu=0.92 | 2.9 | 3466 | **338.30** | 1.1998 | **+17.6%! Best FP8 config** |
 | 5080-B16 | 2026-04-03 | FULL(cold): FP8 weights seqs=256 gpu=0.85 | 1.9 | 3535 | 332.98 | 1.1983 | lower gpu_util hurts KV cache |
 | 5080-B17 | 2026-04-03 | FULL(cold): FP8+perf_mode+async (final) | 2.6 | 3417 | **347.50** | 1.1991 | **+21% over BF16! NEW BEST cold** |
+| 5080-B18 | 2026-04-03 | FULL: TF32 matmul precision=medium | 1.7 | 4117 | 287.44 | 1.1980 | neutral (BF16 model, not FP32) |
+| 5080-B19 | 2026-04-03 | FULL: V1_MULTIPROCESSING=0 | 2.3 | 3688 | 321.97 | 1.2009 | -7%, single-proc blocks event loop |
+| 5080-B20 | 2026-04-03 | FULL: CUDA_MAX_CONNECTIONS=32+chunk=256 | 3.1 | 3421 | 344.63 | 1.1995 | neutral |
+| 5080-B21 | 2026-04-03 | FULL: FlashInfer sampler | 3.1 | 3663 | 317.43 | 1.1983 | -8.6%, slower for argmax |
+| 5080-B22 | 2026-04-03 | FULL: cache seeding (25 queries) | 2.4 | 3678 | 317.33 | 1.1990 | -8.6%, false positive hits |
+| 5080-B23 | 2026-04-03 | FULL: FP8 seqs=128 | 4.0 | 3496 | 337.52 | 1.2005 | seqs=192 better (more batching) |
+| 5080-B24 | 2026-04-03 | enable_dbo=True | — | — | CRASH | — | requires DeepEP (EP only) |
 
 ## Discoveries & Surprises
 
@@ -186,16 +193,21 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 - block_size tuning — FlashInfer doesn't support custom block_size
 - prefix_caching — neutral (prefill already negligible for short inputs)
 - performance_mode/async_scheduling alone — neutral with enforce_eager=True
+- DBO (dual batch overlap) — requires DeepEP expert parallelism kernels
+- VLLM_ENABLE_V1_MULTIPROCESSING=0 — single-process blocks event loop (-7%)
+- FlashInfer sampler — slower than default for temperature=0 argmax (-8.6%)
+- Cache seeding with representative queries — causes false positive keyword hits (-8.6%)
+- TF32 matmul precision — irrelevant for BF16 model
 
 ## Next Steps
 
 Key insight: FP8 quantization cut model memory from 8→4GB, boosting cold-start from 287→347 req/s (+21%).
 
-1. **AWQ-Marlin INT4 quantization** — 2GB model, Marlin kernels hide dequant overhead. SM120 confirmed in vLLM source. Expected 2x over FP8. Need AWQ checkpoint.
-2. **Selective torch.compile on MLP only** — fuse gate+up+silu+down per layer, skip attention (FlashInfer handles it). Avoids CUDA graph OOM.
-3. **VLLM_ENABLE_V1_MULTIPROCESSING=0** — reduce IPC overhead for single GPU
-4. **DBO (dual batch overlap)** — micro-batch decode for L2 cache reuse (split 128→2×64)
-5. **Early stopping / output length prediction** — shorter generation = fewer decode steps
-6. **Warmup cache from training data** — pre-populate cache during startup
-7. **CUDA_DEVICE_MAX_CONNECTIONS=32** — allow more concurrent CUDA streams
-8. **Mixed precision layers** — BF16 attention + FP8 MLP for quality/speed tradeoff
+Current best cold: 347.50 req/s (FP8 + perf_mode + async_sched, seqs=192, gpu=0.92)
+
+1. **AWQ-Marlin INT4 quantization** — 2GB model, Marlin hides dequant overhead. SM120 confirmed. Expected ~2x over FP8. Need pre-quantized checkpoint (no network access to download).
+2. **Selective torch.compile on MLP only** — fuse gate+up+silu+down per layer. High effort (modify vLLM internals), moderate expected gain (10-20% from fewer kernel launches).
+3. **CUDA graphs at gpu=0.80 + FP8** — FP8 halved model to 4GB, might leave room for CUDA graphs. OOM risk.
+4. **Early stopping** — detect EOS early, skip remaining decode steps. vLLM already does this.
+5. **Mixed precision** — BF16 attention + FP8 MLP per-layer. Requires custom model loader.
+6. **Vocab pruning for logits** — skip unused vocab tokens in softmax. Niche optimization.
