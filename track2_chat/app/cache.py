@@ -4,7 +4,7 @@ import logging
 import struct
 from collections import OrderedDict
 
-from app.normalize import extract_keywords
+from app.normalize import extract_keywords, normalize_text
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -38,12 +38,16 @@ class ResponseCache:
         # Keyword thresholds
         self._keyword_threshold = keyword_threshold
         self._hard_stop = hard_stop
+        self._trigram_threshold = 0.40  # Character trigram fallback threshold
 
         # Keyword index: cache_key -> frozenset of keywords
         self._key_keywords: dict[str, frozenset[str]] = {}
 
         # Inverted index: keyword -> set of cache_keys (for O(1) candidate lookup)
         self._inverted: dict[str, set[str]] = {}
+
+        # Character trigram index: cache_key -> frozenset of trigrams
+        self._key_trigrams: dict[str, frozenset[str]] = {}
 
     # ── Exact-match layer ──
 
@@ -131,22 +135,60 @@ class ResponseCache:
 
         return None
 
+    @staticmethod
+    def _char_trigrams(text: str) -> frozenset[str]:
+        text = normalize_text(text)
+        if len(text) < 3:
+            return frozenset()
+        return frozenset(text[i:i+3] for i in range(len(text)-2))
+
+    def _trigram_search(self, query: str) -> dict | None:
+        """Fallback: character trigram Jaccard for typo-tolerant matching."""
+        query_tri = self._char_trigrams(query)
+        if not query_tri:
+            return None
+
+        best_key = None
+        best_score = 0.0
+
+        for key, item_tri in self._key_trigrams.items():
+            inter = query_tri & item_tri
+            if not inter:
+                continue
+            score = len(inter) / len(query_tri | item_tri)
+            if score >= self._trigram_threshold:
+                self._cache.move_to_end(key)
+                self.keyword_hits += 1
+                return self._cache[key]
+            if score > best_score:
+                best_score = score
+                best_key = key
+
+        return None
+
     def semantic_get_keyword_only(self, messages: list[ChatMessage]) -> dict | None:
-        """Fast keyword-only semantic search via inverted index."""
+        """Keyword search with character trigram fallback."""
         if not self._cache:
             return None
-        return self._keyword_search(messages[-1].content)
+        query = messages[-1].content
+        result = self._keyword_search(query)
+        if result is not None:
+            return result
+        # Fallback: trigram matching for typos and variants
+        return self._trigram_search(query)
 
     # ── Store with indexing ──
 
     def _index_entry(self, key: str, query_text: str):
-        """Add keywords to inverted index."""
+        """Add keywords and trigrams to indexes."""
         keywords = frozenset(extract_keywords(query_text))
         self._key_keywords[key] = keywords
         for kw in keywords:
             if kw not in self._inverted:
                 self._inverted[kw] = set()
             self._inverted[kw].add(key)
+        # Also index character trigrams for fallback matching
+        self._key_trigrams[key] = self._char_trigrams(query_text)
 
     def _evict_oldest(self):
         if len(self._cache) <= self._max_size:
@@ -160,6 +202,7 @@ class ResponseCache:
                 bucket.discard(old_key)
                 if not bucket:
                     del self._inverted[kw]
+        self._key_trigrams.pop(old_key, None)
 
     # ── Inflight + store operations ──
 
