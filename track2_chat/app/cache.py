@@ -22,8 +22,8 @@ class ResponseCache:
     def __init__(
         self,
         max_size: int = 16384,
-        keyword_threshold: float = 0.30,
-        hard_stop: float = 0.55,
+        keyword_threshold: float = 0.45,
+        hard_stop: float = 0.70,
     ):
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict]] = {}
@@ -38,7 +38,7 @@ class ResponseCache:
         # Keyword thresholds
         self._keyword_threshold = keyword_threshold
         self._hard_stop = hard_stop
-        self._trigram_threshold = 0.35  # Character trigram fallback threshold
+        self._trigram_threshold = 0.45  # Character trigram fallback threshold
 
         # Keyword index: cache_key -> frozenset of keywords
         self._key_keywords: dict[str, frozenset[str]] = {}
