@@ -21,12 +21,14 @@ EXPOSE 8000
 # GPU libraries
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# vLLM optimizations
+# vLLM optimizations for RTX 5080 (16GB VRAM)
 ENV VLLM_USE_V1=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ENV VLLM_NO_USAGE_STATS=1
 ENV CUDA_MODULE_LOADING=LAZY
 ENV QUANTIZATION=""
 ENV ENABLE_PREFIX_CACHING=false
+ENV ENFORCE_EAGER=true
+ENV GPU_MEMORY_UTILIZATION=0.4
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--loop", "uvloop"]
