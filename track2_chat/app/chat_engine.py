@@ -71,6 +71,7 @@ class ChatEngine:
         )
 
         engine_args = AsyncEngineArgs(
+            attention_backend="flashinfer",
             model=MODEL_NAME,
             max_model_len=MAX_MODEL_LENGTH,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
