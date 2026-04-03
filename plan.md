@@ -123,13 +123,15 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A17 | 2026-04-03 | FULL: V1+CUDA graphs+gpu0.4 | 4 | 8935 | 253.84 | 1.1992 | CUDA graphs eat KV cache at low VRAM |
 | **RTX 5080 RESULTS** | | | | | | | |
 | 5080-main | 2026-04-03 | Baseline (main branch) on RTX 5080 | 6687 | 9054 | 18.15 | 1.1997 | 429 failures! |
-| 5080-arya2 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, no FLASH_ATTN) | **29** | **10483** | **300.81** | **1.1968** | **16.6x baseline, 0 failures** |
+| 5080-arya2-v1 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, FLASH_ATTN broken) | 29 | 10483 | 300.81 | 1.1968 | 16.6x, wrong attn backend |
+| 5080-arya2-v2 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, FlashInfer in code) | **2** | **6337** | **520.64** | **1.1948** | **28.7x baseline, 0 failures** |
 
 ## Discoveries & Surprises
 
 - **V1 beats V0 at high cache hit rates** — with 93%+ cache hits, V0's multi-step scheduling overhead hurts; V1's simpler path is 40% faster
-- **enforce_eager=True on RTX 5080** — confirmed 300 req/s vs 84 req/s with broken FLASH_ATTN
-- **FLASH_ATTN is BROKEN on SM120** — must use FLASHINFER or let vLLM auto-detect
+- **enforce_eager=True on RTX 5080** — confirmed 520 req/s with FlashInfer
+- **FLASH_ATTN is BROKEN on SM120** — must use FLASHINFER. Env var alone insufficient in vLLM 0.19.0 — must pass `attention_backend="flashinfer"` directly to AsyncEngineArgs
+- **vLLM version compatibility** — swap_space, num_scheduler_steps, speculative_config don't exist in 0.19.0. Code now auto-detects supported params via inspect
 - **CRITICAL: Grading uses VALIDATION data (unseen queries)** — cache only helps for duplicates/similar queries within the validation set, not training data
 - **Grading metrics: P50, P95, throughput, perplexity** — P95 not P99
 - **Simple stemming is a 3.2x multiplier** — merging "cancel/cancelling/canceling" reduces unique keyword sets from 2,019 to ~823
