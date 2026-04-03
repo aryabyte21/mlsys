@@ -35,6 +35,7 @@ def _get_sampling_params(temperature: float, max_tokens: int) -> SamplingParams:
         temperature=temperature,
         max_tokens=max_tokens,
         logprobs=1,
+        repetition_penalty=1.05,  # Prevents repetitive outputs, saves decode tokens
     )
 
 
@@ -95,6 +96,12 @@ class ChatEngine:
             "num_scheduler_steps": NUM_SCHEDULER_STEPS,
             "speculative_config": speculative_config,
         }
+        # Limited CUDA graphs: only capture small batch sizes (1-16)
+        # With 97% cache hits, GPU rarely has >8 concurrent requests
+        if not ENFORCE_EAGER and "compilation_config" in valid_params:
+            optional["compilation_config"] = {
+                "cudagraph_capture_sizes": [1, 2, 4, 8, 16],
+            }
         for key, val in optional.items():
             if key in valid_params:
                 kwargs[key] = val
