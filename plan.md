@@ -117,6 +117,8 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | A19 | 2026-04-03 | + char trigram fallback (0.40 thresh) | **7** | 10391 | **238.75** | 1.1984 | +14% via typo-tolerant matching |
 | A20 | 2026-04-03 | kw=0.35 + tri=0.35 (aggressive) | **9** | 10373 | **274.22** | **1.1944** | +31%, perplexity improved |
 | A21 | 2026-04-03 | kw=0.30 + tri=0.35 (ultra-aggressive) | **17** | 9798 | **319.61** | 1.2037 | +52%, perplexity ok |
+| A22 | 2026-04-03 | + synonym normalization | 18 | 10129 | 304.23 | 1.2034 | reverted — synonyms hurt |
+| A23 | 2026-04-03 | FINAL: kw=0.30 + tri=0.35 (no synonyms) | **6** | **9538** | **337.29** | **1.1945** | **BEST** 11.8x baseline |
 | A16 | 2026-04-03 | FULL: V1+enforce_eager+gpu0.95 | 5 | 9733 | 225.24 | 1.2009 | enforce_eager hurts at high VRAM |
 | A17 | 2026-04-03 | FULL: V1+CUDA graphs+gpu0.4 | 4 | 8935 | 253.84 | 1.1992 | CUDA graphs eat KV cache at low VRAM |
 
