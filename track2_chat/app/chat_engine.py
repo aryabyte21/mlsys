@@ -35,7 +35,6 @@ def _get_sampling_params(temperature: float, max_tokens: int) -> SamplingParams:
         temperature=temperature,
         max_tokens=max_tokens,
         logprobs=1,
-        repetition_penalty=1.05,  # Prevents repetitive outputs, saves decode tokens
     )
 
 
