@@ -2,10 +2,10 @@ import os
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 MAX_MODEL_LENGTH = int(os.getenv("MAX_MODEL_LENGTH", "320"))
-GPU_MEMORY_UTILIZATION = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.95"))
-QUANTIZATION = os.getenv("QUANTIZATION", "") or None
+GPU_MEMORY_UTILIZATION = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.92"))
+QUANTIZATION = os.getenv("QUANTIZATION", "fp8") or None
 KV_CACHE_DTYPE = os.getenv("KV_CACHE_DTYPE", "auto")
-MAX_NUM_SEQS = int(os.getenv("MAX_NUM_SEQS", "256"))
+MAX_NUM_SEQS = int(os.getenv("MAX_NUM_SEQS", "192"))
 MAX_NUM_BATCHED_TOKENS = int(os.getenv("MAX_NUM_BATCHED_TOKENS", "8192"))
 ENABLE_PREFIX_CACHING = os.getenv("ENABLE_PREFIX_CACHING", "false").lower() == "true"
 ENABLE_CHUNKED_PREFILL = os.getenv("ENABLE_CHUNKED_PREFILL", "true").lower() == "true"
