@@ -125,11 +125,20 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | 5080-main | 2026-04-03 | Baseline (main branch) on RTX 5080 | 6687 | 9054 | 18.15 | 1.1997 | 429 failures! |
 | 5080-arya2-v1 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, FLASH_ATTN broken) | 29 | 10483 | 300.81 | 1.1968 | 16.6x, wrong attn backend |
 | 5080-arya2-v2 | 2026-04-03 | arya-2 on RTX 5080 (enforce_eager, FlashInfer in code) | **2** | **6337** | **520.64** | **1.1948** | **28.7x baseline, 0 failures** |
+| **arya-3 RESULTS** | | | | | | | |
+| 5080-B1 | 2026-04-03 | Quick: baseline (enforce_eager, auto KV) | 1.8 | 6110 | 104.64 | 1.2016 | quick baseline reference |
+| 5080-B2 | 2026-04-03 | Quick: CUDA graphs (enforce_eager=False, gpu=0.80) | 2.5 | 5732 | 113.60 | 1.2005 | +8.6% quick, OOM at gpu=0.95 |
+| 5080-B3 | 2026-04-03 | Quick: FP8 KV cache (fp8_e4m3) | 2.4 | 6078 | 108.14 | 1.1998 | +3.3% quick |
+| 5080-B4 | 2026-04-03 | FULL: FP8 KV cache (fp8_e4m3) | 2.0 | 5960 | 290.69 | 1.1964 | -44% vs baseline, FP8 dequant overhead |
+| 5080-B5 | 2026-04-03 | FULL: perf_mode=throughput + async_scheduling | **3.7** | **72** | **688.31** | 1.2036 | **+32% throughput, P95 -99%! NEW BEST** |
 
 ## Discoveries & Surprises
 
 - **V1 beats V0 at high cache hit rates** — with 93%+ cache hits, V0's multi-step scheduling overhead hurts; V1's simpler path is 40% faster
 - **enforce_eager=True on RTX 5080** — confirmed 520 req/s with FlashInfer
+- **performance_mode="throughput" + async_scheduling=True** — 688 req/s (+32%), P95 dropped from 6337ms to 72ms. Async scheduling overlaps CPU scheduling with GPU decode.
+- **CUDA graphs OOM at gpu=0.95 on 16GB** — works at gpu=0.80 but reduced KV cache hurts more than graphs help
+- **FP8 KV cache HURTS on RTX 5080** — dequantization overhead per attention step outweighs memory savings (290 vs 520 req/s)
 - **FLASH_ATTN is BROKEN on SM120** — must use FLASHINFER. Env var alone insufficient in vLLM 0.19.0 — must pass `attention_backend="flashinfer"` directly to AsyncEngineArgs
 - **vLLM version compatibility** — swap_space, num_scheduler_steps, speculative_config don't exist in 0.19.0. Code now auto-detects supported params via inspect
 - **CRITICAL: Grading uses VALIDATION data (unseen queries)** — cache only helps for duplicates/similar queries within the validation set, not training data
@@ -153,11 +162,16 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 - max_num_batched_tokens tuning — marginal on A100 (already tested 8192/16384)
 - KV cache compression (H2O/SnapKV) — only helps for >4K token sequences
 - HTTP-level request batching — vLLM continuous batching already optimal
+- CUDA graphs on 16GB (gpu=0.95) — OOM, works at 0.80 but net negative
+- FP8 KV cache on RTX 5080 — dequant overhead kills throughput (-44%)
 
 ## Next Steps
 
-1. **Test semantic cache** with conservative thresholds (0.80 keyword, 0.90 embedding) on A100
-2. **Validate perplexity** — compare per-request distribution with and without semantic cache
-3. **Tune thresholds** — find the sweet spot that maximizes hits without degrading quality
-4. **Test on actual RTX 5080** — deploy to Vast.ai, run benchmark matrix
-5. **Consider vLLM upgrade** if BF16 on 5080 can't sustain 128 concurrent sequences
+1. **FlashInfer autotune** (`enable_flashinfer_autotune=True`) — auto-optimize attention kernels
+2. **Block size tuning** — try block_size=8 for short sequences (max 320 tokens)
+3. **DBO (dual batch overlap)** (`enable_dbo=True`) — novel microbatching
+4. **FP8 weight quantization** (`QUANTIZATION=fp8`) — halves model memory if SM120 supports it
+5. **Prefix caching** re-test — all requests share ~50 token chat template prefix
+6. **max_num_seqs tuning** — with more KV headroom from async scheduling, try 512
+7. **Cache threshold tuning** — measure actual cache hit rate on full benchmark
+8. **System-level env vars** — CUDA_DEVICE_MAX_CONNECTIONS, PYTORCH_CUDA_ALLOC_CONF

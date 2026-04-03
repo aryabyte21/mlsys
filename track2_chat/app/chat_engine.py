@@ -1,4 +1,5 @@
 import logging
+import os
 from itertools import count
 from functools import lru_cache
 
@@ -94,6 +95,8 @@ class ChatEngine:
             "swap_space": SWAP_SPACE,
             "num_scheduler_steps": NUM_SCHEDULER_STEPS,
             "speculative_config": speculative_config,
+            "performance_mode": os.getenv("PERFORMANCE_MODE", "throughput"),
+            "async_scheduling": True,
         }
         for key, val in optional.items():
             if key in valid_params:
