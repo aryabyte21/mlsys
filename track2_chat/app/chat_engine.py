@@ -70,8 +70,11 @@ class ChatEngine:
             ENABLE_CHUNKED_PREFILL, speculative_config,
         )
 
-        engine_args = AsyncEngineArgs(
-            attention_backend="flashinfer",
+        # Build engine args — only include params supported by installed vLLM
+        import inspect
+        valid_params = set(inspect.signature(AsyncEngineArgs.__init__).parameters)
+
+        kwargs = dict(
             model=MODEL_NAME,
             max_model_len=MAX_MODEL_LENGTH,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
@@ -84,10 +87,19 @@ class ChatEngine:
             enable_chunked_prefill=ENABLE_CHUNKED_PREFILL,
             disable_log_stats=True,
             enforce_eager=ENFORCE_EAGER,
-            swap_space=SWAP_SPACE,
-            num_scheduler_steps=NUM_SCHEDULER_STEPS,
-            speculative_config=speculative_config,
         )
+        # Optional params that differ across vLLM versions
+        optional = {
+            "attention_backend": "flashinfer",
+            "swap_space": SWAP_SPACE,
+            "num_scheduler_steps": NUM_SCHEDULER_STEPS,
+            "speculative_config": speculative_config,
+        }
+        for key, val in optional.items():
+            if key in valid_params:
+                kwargs[key] = val
+
+        engine_args = AsyncEngineArgs(**kwargs)
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         # Handle both sync (vLLM 0.8.x) and async (vLLM 0.9.x) get_tokenizer
