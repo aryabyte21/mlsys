@@ -75,12 +75,14 @@ class ChatEngine:
         import inspect
         valid_params = set(inspect.signature(AsyncEngineArgs.__init__).parameters)
 
+        dtype = os.getenv("DTYPE", "auto")
         kwargs = dict(
             model=MODEL_NAME,
             max_model_len=MAX_MODEL_LENGTH,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
             trust_remote_code=True,
             quantization=QUANTIZATION,
+            dtype=dtype,
             kv_cache_dtype=KV_CACHE_DTYPE,
             max_num_seqs=MAX_NUM_SEQS,
             max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,

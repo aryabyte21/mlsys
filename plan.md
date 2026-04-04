@@ -186,6 +186,15 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 - **75% of queries are "safe" for semantic caching** (generic, no entity dependencies)
 - **V0+multi-step beats V1 by 4-5%** on A100 PCIe
 - On A100, FP8/BF16/AWQ all give ~28-29 req/s — bandwidth-bound regardless
+- **AWQ-Marlin INT4 confirmed on SM120** — `check_marlin_supported()` returns True for uint4 with zero_point=True on SM120. Min capability is SM75.
+- **vLLM auto-upgrades AWQ→Marlin** — models with `quant_method=awq` auto-detect and use `awq_marlin` kernel when hardware supports it. No config change needed.
+- **Most HF "AWQ" models use compressed-tensors, NOT awq format** — only models quantized with AutoAWQ (not llm-compressor) have `quant_method=awq` in config. Must check config.json before downloading.
+- **Marlin requires zero_point=True for AWQ** — `Vishva007` model has `zero_point=false` and is NOT Marlin-compatible despite being AWQ format
+- **TensorRT-LLM attention unavailable on SM120** — requires SM100 (B-series data center). Consumer Blackwell (RTX 5080) is SM120.
+- **FlashInfer RoPE NOT fused into attention** — vLLM uses `pos_encoding_mode="NONE"` and applies RoPE separately. Fusion would require vLLM changes.
+- **GQA 4:1 optimal for decode** — FlashInfer broadcasts KV→Q heads in-kernel with near-zero overhead. 4x KV memory savings are "free".
+- **Vocab pruning NOT worthwhile** — lm_head (151K vocab) logits compute is 0.28 ms/step at batch=128, <10% of decode time. Memory-bandwidth is the bottleneck, not compute.
+- **Qwen/Qwen3-4B-AWQ is NOT Instruct-2507** — it's quantized from original Qwen3-4B (May 2025), not the July 2025 Instruct refresh. Different model weights.
 
 ## Dead Ends
 - Spec decode at 128 concurrency — proven harmful by multiple papers
@@ -205,16 +214,125 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 - FlashInfer sampler — slower than default for temperature=0 argmax (-8.6%)
 - Cache seeding with representative queries — causes false positive keyword hits (-8.6%)
 - TF32 matmul precision — irrelevant for BF16 model
+- Vocabulary/logits pruning — lm_head compute is <10% of decode step, bandwidth-bound not compute-bound
+- FlashInfer RoPE fusion — vLLM hardcodes pos_encoding_mode=NONE, would require modifying vLLM attention backend
+- TensorRT-LLM attention — only SM100 (B-series datacenter), not SM120 (RTX 5080)
+- FlashInfer custom block_size — already confirmed unsupported, default 16 is the only option
+- AWQ models with quant_method=compressed-tensors — NOT Marlin-compatible (warshanks, cyankiwi, kaitchup, Sophia-AI)
+- AWQ models with zero_point=false — NOT Marlin-compatible (Vishva007)
+
+## Deep Dive: FlashInfer + Qwen3-4B Architecture Analysis (2026-04-04)
+
+### Qwen3-4B-Instruct-2507 Architecture
+```
+hidden_size:          2560
+intermediate_size:    9728
+num_hidden_layers:    36
+num_attention_heads:  32    (Q heads)
+num_key_value_heads:  8     (KV heads) → GQA ratio 4:1
+head_dim:             128
+vocab_size:           151936
+rope_theta:           5,000,000
+hidden_act:           silu
+torch_dtype:          bfloat16
+tie_word_embeddings:  true
+```
+
+### Memory Breakdown
+| Component | BF16 | FP8 | INT4 AWQ |
+|---|---|---|---|
+| Model weights | 7.49 GB | 3.75 GB | **2.11 GB** |
+| lm_head alone | 0.72 GB | 0.36 GB | 0.72 GB (unquantized) |
+| KV per token (BF16) | 144 KB | 144 KB | 144 KB |
+| KV per token (FP8) | 72 KB | 72 KB | 72 KB |
+
+### RTX 5080 Memory Budget (16GB, gpu_util=0.92)
+| Quant | Model | KV Room | Max Seqs @288 (BF16 KV) | Max Seqs @288 (FP8 KV) |
+|---|---|---|---|---|
+| BF16 | 7.49 GB | 6.73 GB | 170 | 340 |
+| FP8 | 3.75 GB | 10.47 GB | 265 | 530 |
+| **INT4 AWQ** | **2.11 GB** | **12.11 GB** | **306** | **613** |
+
+### Decode Bandwidth Analysis (RTX 5080 = 960 GB/s)
+| Quant | Time/Step | Theoretical Max tok/s/req |
+|---|---|---|
+| BF16 | 7.80 ms | 128 |
+| FP8 | 3.90 ms | 256 |
+| **INT4 AWQ-Marlin** | **2.20 ms** | **456** |
+
+INT4 AWQ-Marlin = ~1.78x faster than FP8 per decode step (2.20 vs 3.90 ms).
+
+### FlashInfer 0.6.6 on SM120 (RTX 5080)
+
+**Key API parameters for batch decode:**
+- `use_tensor_cores=True` — vLLM already enables this for CUDA graph wrapper
+- `page_size` — set by vLLM's `block_size` (default 16, FlashInfer doesn't support custom)
+- `pos_encoding_mode="NONE"` — vLLM handles RoPE separately (not fused into attention)
+- `fixed_split_size` / `disable_split_kv` — only used in VLLM_BATCH_INVARIANT mode
+- `kv_layout="NHD"` — default, matches Qwen3's layout
+
+**TensorRT-LLM attention path:** NOT available on SM120. Requires SM100 (Blackwell B-series data center). RTX 5080 is SM120 consumer Blackwell.
+
+**RoPE fusion:** FlashInfer has `apply_rope_inplace()` and `apply_rope_with_cos_sin_cache_inplace()` but vLLM runs RoPE OUTSIDE the attention kernel. Fusing would require vLLM internals changes — not actionable via config.
+
+**GQA 4:1 handling:** FlashInfer natively handles GQA in batch decode by broadcasting KV heads to Q heads inside the kernel. The 4:1 ratio (32Q/8KV) is optimal — saves 4x KV memory vs MHA while the decode kernel has near-zero overhead for the broadcast.
+
+### AWQ-Marlin INT4 Quantization — CONFIRMED VIABLE
+
+**vLLM 0.19.0 support:**
+- `awq_marlin` quantization method is available
+- `get_min_capability() = 75` (SM75+), SM120 qualifies
+- Marlin INT4 kernel confirmed supported on SM120 via `check_marlin_supported()`
+- Auto-upgrades: loading with `quantization=None` on an AWQ model auto-selects Marlin
+
+**Available Qwen3-4B-Instruct-2507 AWQ checkpoints (Marlin-compatible):**
+
+| Model ID | quant_method | bits | group_size | zero_point | Marlin? |
+|---|---|---|---|---|---|
+| `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` | awq | 4 | 128 | true | **YES** |
+| `Qwen/Qwen3-4B-AWQ` | awq | 4 | 128 | true | **YES** (but base model, not Instruct-2507) |
+| `warshanks/Qwen3-4B-Instruct-2507-AWQ` | compressed-tensors | 4 | 128 | N/A | NO |
+| `cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit` | compressed-tensors | 4 | 128 | N/A | NO |
+| `kaitchup/Qwen3-4B-Instruct-2507-awq-w4a16-asym` | compressed-tensors | 4 | 128 | N/A | NO |
+| `Sophia-AI/Qwen3-4B-Instruct-2507-AWQ-W4A16` | compressed-tensors | 4 | 128 | N/A | NO |
+| `Vishva007/Qwen3-4B-Instruct-2507-W4A16-AutoRound-AWQ` | awq | 4 | 128 | false | NO (needs zero_point=true) |
+
+**BEST CANDIDATE: `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`**
+- Correct base model (Instruct-2507)
+- quant_method=awq, zero_point=true → auto-upgrades to AWQ-Marlin
+- Quantized with AutoAWQ (industry standard)
+- ~2.1 GB model = 1.64 GB freed vs FP8
+
+**GPTQ-Marlin alternatives (also Marlin-compatible):**
+- `kaitchup/Qwen3-4B-Instruct-2507-gptq-w4a16-g128` — GPTQ W4A16, group_size=128
+- `AXERA-TECH/Qwen3-4B-Instruct-2507-GPTQ-Int4`
+- `numen-tech/Qwen3-4B-Instruct-2507-GPTQ-Int4`
+
+### Vocabulary Pruning Analysis
+- lm_head is 2560 x 151936 = 389M params (9.7% of model)
+- At batch=128, logits matmul = ~100 GFLOPS per decode step
+- Theoretical compute time: 0.28 ms (RTX 5080 355 TFLOPS FP16)
+- **NOT worth pursuing** — logits compute is <10% of decode step time, and memory bandwidth for weight read dominates, not compute
 
 ## Next Steps
 
-Key insight: FP8 quantization cut model memory from 8→4GB, boosting cold-start from 287→347 req/s (+21%).
-
 Current best cold: **364.53 req/s** (FP8 + seqs=192 + gpu=0.92 + max_model_len=288)
 
-1. **AWQ-Marlin INT4 quantization** — 2GB model, Marlin hides dequant overhead. SM120 confirmed. Expected ~2x over FP8. Need pre-quantized checkpoint (no network access to download).
-2. **Selective torch.compile on MLP only** — fuse gate+up+silu+down per layer. High effort (modify vLLM internals), moderate expected gain (10-20% from fewer kernel launches).
-3. **CUDA graphs at gpu=0.80 + FP8** — FP8 halved model to 4GB, might leave room for CUDA graphs. OOM risk.
-4. **Early stopping** — detect EOS early, skip remaining decode steps. vLLM already does this.
-5. **Mixed precision** — BF16 attention + FP8 MLP per-layer. Requires custom model loader.
-6. **Vocab pruning for logits** — skip unused vocab tokens in softmax. Niche optimization.
+1. **AWQ-Marlin INT4 quantization — HIGHEST PRIORITY**
+   - Use `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` checkpoint
+   - Config: `MODEL_NAME=Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`, `QUANTIZATION=""` (auto-detect → awq_marlin)
+   - Expected: ~2.11 GB model (vs 3.75 GB FP8), decode step 2.20 ms (vs 3.90 ms FP8)
+   - Memory freed for KV: +1.64 GB = ~47 more seqs @ 288 tokens
+   - **Expected throughput: ~500+ req/s cold** (1.4-1.8x over FP8)
+   - Risk: perplexity regression from INT4 (typically <0.05 increase)
+   - Needs: download checkpoint (requires network access)
+
+2. **CUDA graphs + INT4 AWQ** — with 2.11 GB model + 0.5 GB overhead, ~12 GB for KV + CUDA graphs. More room than FP8 had.
+
+3. **compressed-tensors W4A16 (fallback)** — if AWQ-Marlin has issues, `compressed-tensors` quant models (warshanks, cyankiwi, kaitchup) work with vLLM's native `compressed-tensors` backend. Slower than Marlin but still INT4.
+
+4. **FP8 KV cache + INT4 AWQ** — combine INT4 weights with FP8 KV cache. Doubles KV capacity (613 seqs @288) while model is already small. May help at very high concurrency.
+
+5. **Selective torch.compile on MLP** — high effort, moderate gain (10-20%), requires modifying vLLM model code.
+
+6. **Early exit / logits optimization** — NOT worth pursuing (analysis above shows logits < 10% of decode time).
