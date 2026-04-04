@@ -156,6 +156,9 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | 5080-B28 | 2026-04-04 | FP8 seqs=256 gpu=0.90 len=288 | 2.5 | 3474 | 336.73 | 1.1971 | still worse than seqs=192/gpu=0.92 |
 | 5080-B29 | 2026-04-04 | FP8 max_model_len=272 (too tight) | 1.9 | 3851 | 298.19 | 1.1974 | truncates some outputs |
 | 5080-B30 | 2026-04-04 | FP8 seqs=224 len=288 | 2.9 | 3767 | 315.55 | 1.1979 | sampler warmup eats KV room |
+| 5080-B31 | 2026-04-04 | AWQ-Marlin INT4 (correct AWQ format) | — | — | CRASH | — | Marlin PTX not compiled for SM120 |
+| 5080-B32 | 2026-04-04 | GPTQ INT4 (FP16, no Marlin fallback) | 1.5 | 5219 | 254.65 | 1.2181 | slow dequant, bad quality |
+| 5080-B33 | 2026-04-04 | **Inductor compile (no CUDA graphs)** | **3.2** | **2916** | **395.48** | **1.1979** | **+8.5%! fuse_norm_quant works** |
 
 ## Discoveries & Surprises
 
@@ -316,7 +319,7 @@ INT4 AWQ-Marlin = ~1.78x faster than FP8 per decode step (2.20 vs 3.90 ms).
 
 ## Next Steps
 
-Current best cold: **364.53 req/s** (FP8 + seqs=192 + gpu=0.92 + max_model_len=288)
+Current best cold: **395.48 req/s** (FP8 + Inductor compile + seqs=192 + gpu=0.92 + max_model_len=288)
 
 1. **AWQ-Marlin INT4 quantization — HIGHEST PRIORITY**
    - Use `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` checkpoint
