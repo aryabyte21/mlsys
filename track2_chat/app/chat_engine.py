@@ -99,9 +99,10 @@ class ChatEngine:
         if not ENFORCE_EAGER:
             try:
                 from vllm.config import CompilationConfig
+                cudagraph = os.getenv("CUDAGRAPH_MODE", "none")
                 kwargs["compilation_config"] = CompilationConfig(
                     mode=3,  # VLLM_COMPILE mode
-                    cudagraph_mode="none",  # No CUDA graphs — avoid OOM
+                    cudagraph_mode=cudagraph,
                 )
                 logger.info("Inductor compilation enabled (no CUDA graphs)")
             except Exception:
@@ -115,6 +116,8 @@ class ChatEngine:
             "speculative_config": speculative_config,
             "performance_mode": os.getenv("PERFORMANCE_MODE", "throughput"),
             "async_scheduling": True,
+            "stream_interval": 256,  # Disable per-token streaming (batch output)
+            "scheduler_reserve_full_isl": False,  # Faster request admission
         }
         for key, val in optional.items():
             if key in valid_params:
