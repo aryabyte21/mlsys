@@ -117,7 +117,7 @@ class ChatEngine:
             "performance_mode": os.getenv("PERFORMANCE_MODE", "throughput"),
             "async_scheduling": True,
             "stream_interval": 256,  # Disable per-token streaming (batch output)
-            "scheduler_reserve_full_isl": False,  # Faster request admission
+            # scheduler_reserve_full_isl=False removed — hurts perplexity via preemptions
         }
         for key, val in optional.items():
             if key in valid_params:
