@@ -281,7 +281,20 @@ INT4 quantization would theoretically double our throughput (2GB model → 2.1ms
 - **Perplexity degrades**: 1.218 vs 1.202
 - The dequantization overhead on every matmul negates the bandwidth savings
 
-**Conclusion**: INT4 on SM120 is **blocked by Marlin kernel compilation** (vLLM GitHub #35432). FP8 is the optimal quantization for consumer Blackwell until vLLM ships SM120-compiled Marlin. If/when Marlin gets SM120 support, INT4 AWQ would likely push throughput to ~600-700 req/s.
+**Attempt 4 — AWQ with Triton backend** (`VLLM_USE_TRITON_AWQ=1`):
+- Discovered an env var that forces a **Triton-based AWQ kernel** instead of Marlin
+- Triton JIT-compiles kernels at runtime for the current GPU — **works on SM120!**
+- Server starts successfully in 50s (Triton compilation overhead)
+- **Result: 250 req/s** — **40% slower than FP8** (429 req/s)
+- The Triton dequantization kernel is generic and does not use SM120's tensor cores efficiently
+- Perplexity: 1.206 (acceptable but worse than FP8's 1.202)
+
+**Conclusion**: All four INT4 paths were tested. FP8 is definitively faster on SM120 because:
+1. SM120 has **native FP8 tensor cores** with optimized CUTLASS kernels (vLLM PR #38325 with swapAB strategy giving 69% better bandwidth)
+2. INT4 dequantization on SM120 runs through generic Triton/PyTorch paths **without tensor core acceleration**
+3. The dequantization compute overhead exceeds the bandwidth savings from the smaller model
+
+FP8 is the optimal quantization for consumer Blackwell (SM120). INT4 would only become competitive if Marlin gets SM120-compiled kernels with tensor core dequantization.
 
 ### 5.5 Impact
 

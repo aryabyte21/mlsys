@@ -323,15 +323,13 @@ Current best cold: **429.29 req/s** (FP8 + Inductor + stream_interval=256 + seqs
 
 ### Blocked — Waiting on vLLM SM120 Support
 
-1. **AWQ-Marlin INT4 quantization — BLOCKED by Marlin PTX**
-   - Tested with `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` (correct `quant_method=awq` format)
-   - vLLM auto-detects AWQ and routes to `awq_marlin` kernel
-   - **CRASHES**: `CUDA error: the provided PTX was compiled with an unsupported toolchain` in `marlin_permute_scales()`
-   - Root cause: Marlin CUDA kernels are compiled for SM75-SM90 only. SM120 not in target list.
-   - Also tested `compressed-tensors` format (cyankiwi, warshanks models) — same Marlin crash
-   - GPTQ INT4 fallback (without Marlin) works but is 40% slower than FP8 (255 vs 429 req/s) with worse perplexity (1.218)
-   - **Will become viable when vLLM recompiles Marlin for SM120** (tracked in vLLM #35432)
-   - Theoretical impact if unblocked: ~600-700 req/s (2GB model vs 4GB FP8)
+1. **AWQ INT4 quantization — ALL PATHS TESTED, FP8 IS FASTER**
+   - **Marlin backend**: Crashes — Marlin PTX not compiled for SM120 (`marlin_permute_scales()` fails)
+   - **Triton backend** (`VLLM_USE_TRITON_AWQ=1`): **WORKS** on SM120! But only **250 req/s** — 40% slower than FP8 (429 req/s). Triton AWQ dequantization kernel is slower than native FP8 CUTLASS.
+   - **GPTQ fallback** (no Marlin): Works but 255 req/s with worse perplexity (1.218)
+   - **compressed-tensors format**: Routes through Marlin → same crash as Marlin backend
+   - **Why FP8 wins**: SM120 has native FP8 tensor cores with optimized CUTLASS kernels (vLLM PR #38325 swapAB). INT4 dequant runs on generic Triton/PyTorch without tensor core acceleration.
+   - **Conclusion**: FP8 is the optimal quantization for SM120. INT4 would only help if Marlin gets SM120-compiled kernels.
 
 2. **CUDA graphs** — BLOCKED by 16GB VRAM. Even with FP8 (4GB model), torch.compile graph capture OOMs at gpu=0.92+.
 
