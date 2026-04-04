@@ -319,23 +319,24 @@ INT4 AWQ-Marlin = ~1.78x faster than FP8 per decode step (2.20 vs 3.90 ms).
 
 ## Next Steps
 
-Current best cold: **395.48 req/s** (FP8 + Inductor compile + seqs=192 + gpu=0.92 + max_model_len=288)
+Current best cold: **429.29 req/s** (FP8 + Inductor + stream_interval=256 + seqs=192 + gpu=0.92 + max_model_len=288)
 
-1. **AWQ-Marlin INT4 quantization — HIGHEST PRIORITY**
-   - Use `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` checkpoint
-   - Config: `MODEL_NAME=Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`, `QUANTIZATION=""` (auto-detect → awq_marlin)
-   - Expected: ~2.11 GB model (vs 3.75 GB FP8), decode step 2.20 ms (vs 3.90 ms FP8)
-   - Memory freed for KV: +1.64 GB = ~47 more seqs @ 288 tokens
-   - **Expected throughput: ~500+ req/s cold** (1.4-1.8x over FP8)
-   - Risk: perplexity regression from INT4 (typically <0.05 increase)
-   - Needs: download checkpoint (requires network access)
+### Blocked — Waiting on vLLM SM120 Support
 
-2. **CUDA graphs + INT4 AWQ** — with 2.11 GB model + 0.5 GB overhead, ~12 GB for KV + CUDA graphs. More room than FP8 had.
+1. **AWQ-Marlin INT4 quantization — BLOCKED by Marlin PTX**
+   - Tested with `Eslzzyl/Qwen3-4B-Instruct-2507-AWQ` (correct `quant_method=awq` format)
+   - vLLM auto-detects AWQ and routes to `awq_marlin` kernel
+   - **CRASHES**: `CUDA error: the provided PTX was compiled with an unsupported toolchain` in `marlin_permute_scales()`
+   - Root cause: Marlin CUDA kernels are compiled for SM75-SM90 only. SM120 not in target list.
+   - Also tested `compressed-tensors` format (cyankiwi, warshanks models) — same Marlin crash
+   - GPTQ INT4 fallback (without Marlin) works but is 40% slower than FP8 (255 vs 429 req/s) with worse perplexity (1.218)
+   - **Will become viable when vLLM recompiles Marlin for SM120** (tracked in vLLM #35432)
+   - Theoretical impact if unblocked: ~600-700 req/s (2GB model vs 4GB FP8)
 
-3. **compressed-tensors W4A16 (fallback)** — if AWQ-Marlin has issues, `compressed-tensors` quant models (warshanks, cyankiwi, kaitchup) work with vLLM's native `compressed-tensors` backend. Slower than Marlin but still INT4.
+2. **CUDA graphs** — BLOCKED by 16GB VRAM. Even with FP8 (4GB model), torch.compile graph capture OOMs at gpu=0.92+.
 
-4. **FP8 KV cache + INT4 AWQ** — combine INT4 weights with FP8 KV cache. Doubles KV capacity (613 seqs @288) while model is already small. May help at very high concurrency.
+### Diminishing Returns — Remaining Levers
 
-5. **Selective torch.compile on MLP** — high effort, moderate gain (10-20%), requires modifying vLLM model code.
-
-6. **Early exit / logits optimization** — NOT worth pursuing (analysis above shows logits < 10% of decode time).
+3. **Selective torch.compile on MLP** — fuse gate+up+silu+down per layer. High effort (modify vLLM model code), moderate expected gain (5-10%).
+4. **KV cache offloading to CPU** — crashed with FP8 (meta tensor error). May work in future vLLM versions.
+5. **Cache algorithm improvements** — keyword caching is well-tuned. More aggressive matching causes false positives that hurt perplexity. The current thresholds (kw=0.45, hard=0.70, tri=0.45) are the sweet spot.

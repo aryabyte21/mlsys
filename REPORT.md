@@ -258,12 +258,30 @@ FP8 initially crashed at `max_num_seqs=256` because vLLM's sampler warmup alloca
 
 **Fix**: Lowered `max_num_seqs` to 192 and `gpu_memory_utilization` to 0.92. This leaves enough room for the sampler while maximizing KV cache capacity.
 
-### 5.4 Why Not INT4?
+### 5.4 Why Not INT4? (Thoroughly Tested, Blocked on SM120)
 
-We tested both AWQ-Marlin and GPTQ INT4 quantization:
+INT4 quantization would theoretically double our throughput (2GB model → 2.1ms per decode step). We tested it exhaustively across 3 checkpoint formats and 2 quantization backends:
 
-- **AWQ-Marlin**: Marlin CUDA kernels are compiled as PTX targeting SM75-SM90. SM120 is not in the target list, causing `CUDA error: unsupported toolchain`. Dead end until vLLM recompiles Marlin for SM120.
-- **GPTQ (without Marlin)**: Works via a naive PyTorch dequantization fallback, but is **30% slower** than FP8 and degrades perplexity (1.218 vs 1.199). The dequantization overhead negates the bandwidth savings.
+**Attempt 1 — AWQ `compressed-tensors` format** (cyankiwi, warshanks models):
+- These HuggingFace models are labeled "AWQ" but use `quant_method: compressed-tensors` (quantized by llm-compressor, not AutoAWQ)
+- vLLM routes compressed-tensors through Marlin kernels regardless
+- **Crash**: `CUDA error: the provided PTX was compiled with an unsupported toolchain`
+- Root cause: Marlin PTX binary targets SM75-SM90 only
+
+**Attempt 2 — AWQ native format** (`Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`):
+- Correct format: `quant_method: awq`, `bits: 4`, `group_size: 128`, `zero_point: true`
+- vLLM auto-detects AWQ and selects `awq_marlin` kernel (verified via `check_marlin_supported()` returning True for SM120)
+- **Same crash**: `marlin_permute_scales()` fails because the Marlin CUDA kernel PTX is not compiled for SM120
+- The API-level check (`check_marlin_supported`) passes, but the actual kernel binary doesn't support SM120
+
+**Attempt 3 — GPTQ INT4 without Marlin** (`JunHowie/Qwen3-4B-Instruct-2507-GPTQ-Int4`):
+- GPTQ requires `dtype=float16` (not BF16)
+- With Marlin disabled, falls back to naive PyTorch dequantization
+- **Works but is 40% slower**: 255 req/s vs 429 req/s (FP8)
+- **Perplexity degrades**: 1.218 vs 1.202
+- The dequantization overhead on every matmul negates the bandwidth savings
+
+**Conclusion**: INT4 on SM120 is **blocked by Marlin kernel compilation** (vLLM GitHub #35432). FP8 is the optimal quantization for consumer Blackwell until vLLM ships SM120-compiled Marlin. If/when Marlin gets SM120 support, INT4 AWQ would likely push throughput to ~600-700 req/s.
 
 ### 5.5 Impact
 
