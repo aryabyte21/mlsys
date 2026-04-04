@@ -476,14 +476,16 @@ Failures:     0
 
 ## 12. Optimization Journey: Progressive Gains
 
-| Step | Optimization | Throughput | Cumulative Gain |
-|------|-------------|-----------|-----------------|
-| 0 | Unoptimized baseline (main) | 18 req/s | -- |
-| 1 | + Multi-layer keyword cache + FlashInfer + enforce_eager | 287 req/s | +15.9x |
-| 2 | + FP8 weight quantization | 347 req/s | +19.3x |
-| 3 | + max_model_len=288 | 364 req/s | +20.2x |
-| 4 | + Inductor compilation (no CUDA graphs) | 395 req/s | +21.9x |
-| 5 | + stream_interval=256 | **429 req/s** | **+23.8x** |
+All numbers are **full 13K cold-start benchmarks** on RTX 5080 at 128 concurrency.
+
+| Step | Optimization | Throughput | Cumulative Gain | Perplexity |
+|------|-------------|-----------|-----------------|-----------|
+| 0 | Unoptimized baseline (main) | 18 req/s | -- | 1.200 |
+| 1 | + Multi-layer keyword cache + FlashInfer + enforce_eager | 287 req/s | +15.9x | 1.199 |
+| 2 | + FP8 weight quantization | 347 req/s | +19.1x | 1.199 |
+| 3 | + max_model_len=288 | 364 req/s | +20.1x | 1.200 |
+| 4 | + Inductor compilation (no CUDA graphs) | 395 req/s | +21.8x | 1.198 |
+| 5 | + stream_interval=256 | **429 req/s** | **+23.6x** | **1.202** |
 
 ---
 
@@ -525,31 +527,40 @@ Key research-driven discoveries:
 
 ## 14. Full Benchmark Scores (RTX 5080, Cold-Start)
 
-### 14.1 Winning Configurations (Chronological)
+> **Important**: All scores below (except the unoptimized baseline and warm-cache row) are from **full cold-start benchmarks**: 13,435 requests at 128 concurrency using `data/track2/train.jsonl`. "Cold-start" means the server was freshly started with an empty cache — no prior queries. This is the realistic scenario for grading, where validation data is unseen.
 
-| Config | Throughput | P50 | P95 | P99 | Perplexity | Failures |
-|--------|-----------|-----|-----|-----|-----------|----------|
-| Unoptimized baseline (main) | 18.15 req/s | 6,687 ms | — | 9,054 ms | 1.1997 | **429** |
-| + FlashInfer + cache (arya-2) | 287.68 req/s | 1.7 ms | 4,101 ms | 6,230 ms | 1.1985 | 0 |
-| + FP8 quantization | 347.50 req/s | 2.6 ms | 3,417 ms | 5,594 ms | 1.1991 | 0 |
-| + max_model_len=288 | 364.53 req/s | 4.5 ms | 3,229 ms | 5,033 ms | 1.1997 | 0 |
-| + Inductor compilation | 395.48 req/s | 3.2 ms | 2,916 ms | 4,645 ms | 1.1979 | 0 |
-| + stream_interval=256 | **429.29 req/s** | **6.7 ms** | **2,715 ms** | **4,464 ms** | **1.2017** | **0** |
+### 14.1 Winning Configurations (Chronological, All Full 13K Cold-Start)
+
+| # | Config | Throughput | P50 | P95 | P99 | Perplexity | Failures | Benchmark |
+|---|--------|-----------|-----|-----|-----|-----------|----------|-----------|
+| 0 | Unoptimized baseline (main) | 18.15 req/s | 6,687 ms | — | 9,054 ms | 1.1997 | **429** | Full 13K |
+| 1 | + FlashInfer + cache (arya-2) | 287.68 req/s | 1.7 ms | 4,101 ms | 6,230 ms | 1.1985 | 0 | Full 13K cold |
+| 2 | + FP8 quantization | 347.50 req/s | 2.6 ms | 3,417 ms | 5,594 ms | 1.1991 | 0 | Full 13K cold |
+| 3 | + max_model_len=288 | 364.53 req/s | 4.5 ms | 3,229 ms | 5,033 ms | 1.1997 | 0 | Full 13K cold |
+| 4 | + Inductor compilation | 395.48 req/s | 3.2 ms | 2,916 ms | 4,645 ms | 1.1979 | 0 | Full 13K cold |
+| 5 | + stream_interval=256 | **429.29 req/s** | **6.7 ms** | **2,715 ms** | **4,464 ms** | **1.2017** | **0** | **Full 13K cold** |
+
+**Note on row 5 (429 req/s)**: This is the result after *removing* `scheduler_reserve_full_isl=False`. An earlier test with that flag gave 405 req/s but degraded perplexity to 1.2046 due to request preemptions. Removing it both improved throughput (405→429) and restored perplexity (1.2046→1.2017). The only scheduling change kept is `stream_interval=256`.
 
 ### 14.2 Warm-Cache Performance (Second Run on Same Server)
 
-| Config | Throughput | P50 | P95 | P99 | Perplexity |
-|--------|-----------|-----|-----|-----|-----------|
-| Final config (warm) | **2,037 req/s** | 45 ms | 83 ms | 110 ms | 1.2017 |
+These numbers show what happens when the keyword cache is already populated from a prior benchmark run. The cache serves ~93% of requests instantly. **These are NOT representative of grading performance** (grading uses unseen validation data on a fresh server).
 
-### 14.3 Key Rejected Configurations
+| Config | Throughput | P50 | P95 | P99 | Perplexity | Benchmark |
+|--------|-----------|-----|-----|-----|-----------|-----------|
+| Final config (warm) | 2,037 req/s | 45 ms | 83 ms | 110 ms | 1.2017 | Full 13K warm |
 
-| Config | Throughput | Perplexity | Why Rejected |
-|--------|-----------|-----------|-------------|
-| CUDA graphs (enforce_eager=False, gpu=0.80) | 113 req/s | 1.2005 | OOM at gpu=0.95, reduced KV cache |
-| FP8 KV cache | 290 req/s | 1.1964 | Dequant overhead per attention step |
-| GPTQ INT4 (no Marlin) | 255 req/s | 1.2181 | Slow fallback dequant, quality loss |
-| FlashInfer sampler | 317 req/s | 1.1983 | Slower than PyTorch argmax |
-| Cache seeding (25 queries) | 317 req/s | 1.1990 | False positive keyword matches |
-| scheduler_reserve_full_isl=False | 405 req/s | **1.2046** | Caused preemptions, hurt perplexity |
-| max_model_len=272 | 298 req/s | 1.1974 | Truncated some outputs |
+### 14.3 Key Rejected Configurations (All Full 13K Cold-Start)
+
+| Config | Throughput | Perplexity | Why Rejected | Benchmark |
+|--------|-----------|-----------|-------------|-----------|
+| CUDA graphs (enforce_eager=False, gpu=0.80) | 113 req/s | 1.2005 | OOM at gpu=0.95, reduced KV cache | Full 13K cold |
+| FP8 KV cache (fp8_e4m3) | 290 req/s | 1.1964 | Dequant overhead per attention step | Full 13K cold |
+| GPTQ INT4 (no Marlin fallback) | 255 req/s | 1.2181 | Slow PyTorch dequant, quality loss | Full 13K cold |
+| FlashInfer sampler | 317 req/s | 1.1983 | Slower than PyTorch argmax for temp=0 | Full 13K cold |
+| Cache seeding (25 queries) | 317 req/s | 1.1990 | False positive keyword matches | Full 13K cold |
+| scheduler_reserve_full_isl=False | 405 req/s | **1.2046** | Preemptions hurt both speed and quality | Full 13K cold |
+| max_model_len=272 | 298 req/s | 1.1974 | Truncated some outputs | Full 13K cold |
+| FlashInfer autotune | 396 req/s | 1.1986 | Default kernel selection already optimal | Full 13K cold |
+| FP8 seqs=256 gpu=0.85 | 333 req/s | 1.1983 | Lower gpu_util hurts KV cache | Full 13K cold |
+| VLLM_ENABLE_V1_MULTIPROCESSING=0 | 322 req/s | 1.2009 | Single-process blocks event loop | Full 13K cold |
