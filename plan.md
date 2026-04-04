@@ -152,6 +152,10 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | 5080-B24 | 2026-04-03 | enable_dbo=True | — | — | CRASH | — | requires DeepEP (EP only) |
 | 5080-B25 | 2026-04-04 | FP8 seqs=256 gpu=0.90 | 2.5 | 3474 | 336.73 | 1.1971 | seqs=192/gpu=0.92 still better |
 | 5080-B26 | 2026-04-04 | FP8 max_model_len=288 (was 320) | **4.5** | **3229** | **364.53** | 1.1997 | **+4.9%! tighter seq len = more KV** |
+| 5080-B27 | 2026-04-04 | FP8 max_batched_tokens=16384 | 1.8 | 3573 | 324.34 | 1.1989 | larger batches hurt |
+| 5080-B28 | 2026-04-04 | FP8 seqs=256 gpu=0.90 len=288 | 2.5 | 3474 | 336.73 | 1.1971 | still worse than seqs=192/gpu=0.92 |
+| 5080-B29 | 2026-04-04 | FP8 max_model_len=272 (too tight) | 1.9 | 3851 | 298.19 | 1.1974 | truncates some outputs |
+| 5080-B30 | 2026-04-04 | FP8 seqs=224 len=288 | 2.9 | 3767 | 315.55 | 1.1979 | sampler warmup eats KV room |
 
 ## Discoveries & Surprises
 
@@ -206,7 +210,7 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 
 Key insight: FP8 quantization cut model memory from 8→4GB, boosting cold-start from 287→347 req/s (+21%).
 
-Current best cold: 347.50 req/s (FP8 + perf_mode + async_sched, seqs=192, gpu=0.92)
+Current best cold: **364.53 req/s** (FP8 + seqs=192 + gpu=0.92 + max_model_len=288)
 
 1. **AWQ-Marlin INT4 quantization** — 2GB model, Marlin hides dequant overhead. SM120 confirmed. Expected ~2x over FP8. Need pre-quantized checkpoint (no network access to download).
 2. **Selective torch.compile on MLP only** — fuse gate+up+silu+down per layer. High effort (modify vLLM internals), moderate expected gain (10-20% from fewer kernel launches).
