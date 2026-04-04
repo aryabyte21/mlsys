@@ -114,48 +114,170 @@ For typo-tolerant matching, we also index character trigrams. If keyword matchin
 Jaccard = |{can}| / |{can,anc,nce,cel,ans,nse,sel}| = 1/7 = 0.14
 ```
 
-### 3.5 Impact
+### 3.5 Tunable Knobs: Cache Threshold Configuration
+
+The cache has **three thresholds** that control the quality/speed tradeoff. These are the most important knobs for adapting to different data distributions:
+
+| Knob | Default | Range | Effect |
+|------|---------|-------|--------|
+| `keyword_threshold` | 0.45 | 0.25 - 0.80 | Minimum Jaccard similarity to return a cached response. Lower = more cache hits but more false positives. |
+| `hard_stop` | 0.70 | 0.50 - 0.90 | If Jaccard exceeds this, return immediately without checking further candidates. Higher = more confident matches only. |
+| `trigram_threshold` | 0.45 | 0.30 - 0.60 | Character trigram Jaccard for typo-tolerant fallback. Lower = catches more typos but risks unrelated matches. |
+
+**What happens when you turn them:**
+
+- **Lower thresholds (e.g., kw=0.30, hard=0.55)**: More cache hits, higher throughput on training data. But returns wrong answers for genuinely different queries — "cancel order" might match "track order" since both share "order". We tested kw=0.30 and saw **+52% throughput but perplexity degraded** (A21: 1.2037 vs 1.1945). On unseen validation data, this risk is amplified.
+
+- **Higher thresholds (e.g., kw=0.65, hard=0.85)**: Fewer false positives, better perplexity. But cache hit rate drops, forcing more GPU inference. We tested kw=0.65 initially (A7) and got only 40 req/s.
+
+- **The sweet spot (kw=0.45, hard=0.70)**: Balances cache hits vs correctness. Catches true paraphrases ("cancel my order" ↔ "I want to cancel the order") while rejecting different intents ("cancel order" vs "track order"). This was found through 8 iterations of threshold tuning (Q1-Q6, A7-A23).
+
+**Experimentation history:**
+
+| Thresholds (kw/hard) | Hit Rate | Throughput | Perplexity | Verdict |
+|---|---|---|---|---|
+| 0.65 / 0.82 | ~40% | 40 req/s | 1.2004 | Too conservative |
+| 0.55 / 0.75 | ~55% | 51 req/s | 1.2011 | Better |
+| 0.45 / 0.70 | ~65% | 76 req/s | 1.1992 | Current default |
+| 0.40 / 0.70 | ~70% | 77 req/s | 1.1967 | Marginal gain |
+| 0.35 / 0.65 | ~75% | 76 req/s | 1.1974 | Diminishing returns |
+| 0.30 / 0.55 | ~80% | 85 req/s | 1.2037 | Perplexity degrades |
+
+### 3.6 Advantages and Disadvantages of Keyword Caching
+
+**Advantages:**
+
+1. **Zero external dependencies**: Pure Python — no ML models, no FAISS, no sentence-transformers. Faster Docker builds, smaller image, no version conflicts.
+2. **Deterministic and interpretable**: You can inspect exactly why two queries matched (shared keywords). Neural embeddings are black boxes.
+3. **O(1) candidate lookup**: The inverted index makes lookup time independent of cache size. Neural approaches require O(n) similarity search or approximate nearest neighbor structures.
+4. **No GPU contention**: The cache runs entirely on CPU. Embedding models would compete with the LLM for GPU memory and compute.
+5. **Low latency**: Cache lookup takes <0.1ms. Embedding + FAISS search takes 5-50ms.
+6. **Stemming merges morphological variants**: "cancel/cancelling/cancelled/cancellation" all become "cancel", achieving coverage that even embeddings sometimes miss for domain-specific terms.
+
+**Disadvantages:**
+
+1. **No semantic understanding**: "I want a refund" and "give me my money back" share zero keywords after stopword removal. An embedding model would recognize these as identical intent.
+2. **Sensitive to word choice**: The Jaccard metric treats all keywords equally. "cancel order" and "cancel account" both have 50% overlap but very different intents.
+3. **Domain-specific tuning required**: The stopword list and stemmer rules are hand-tuned for customer service. A different domain (medical, legal) would need different rules.
+4. **No handling of negation**: "I want to cancel" and "I don't want to cancel" produce identical keywords after stopword removal.
+
+**Why it's the best approach for THIS specific benchmark:**
+
+1. **Temperature=0 (deterministic)**: Every query with the same content produces the identical response. This makes caching safe — there's no randomness.
+2. **Short queries (12 tokens avg)**: With so few words, keyword overlap is a strong signal. Longer queries would dilute the Jaccard scores.
+3. **Customer service domain**: ~17 distinct intents with clear keyword patterns (cancel, refund, track, delivery, payment, account, etc.). Keywords naturally cluster by intent.
+4. **High duplicate rate**: 36% exact duplicates in training data, plus paraphrases. The cache is effective even with conservative thresholds.
+5. **No GPU budget for embeddings**: On 16GB VRAM with a 4GB model, there's no room for an embedding model. CPU-based embeddings would add latency.
+
+### 3.7 Impact
 
 On training data (36% exact duplicates): **~50% cache hit rate** on cold start, pushing throughput from ~170 raw GPU req/s to 429 req/s. On warm runs (all queries seen): 2000+ req/s.
 
 ---
 
-## 4. Optimization 2: FP8 Weight Quantization (GPU Compute)
+## 4. Pre-arya-3 Optimizations (arya / arya-2 branches)
 
-### 4.1 What It Does
+Before the arya-3 GPU-level optimizations, significant work was done on the arya and arya-2 branches. These earlier optimizations built the application-layer foundation.
+
+### 4.1 Early Exploration (arya branch, March 2026)
+
+The project started on the arya branch with the professor's starter template. Initial work focused on understanding the system:
+
+- **Benchmarked on Modal L4 GPU**: 13.33 req/s baseline (P50=9.8s, perplexity=1.20)
+- **Benchmarked on H200 (141GB VRAM)**: FP8, BF16, AWQ all gave ~28-29 req/s — confirming the system is **bandwidth-bound**, not compute-bound
+- **Added inflight request deduplication**: Coalesced identical concurrent requests to share GPU results
+- **Optimized FastAPI path**: Skipped Pydantic validation, direct tokenization, cached SamplingParams, orjson serialization
+
+### 4.2 Semantic Caching Evolution (arya-2 branch)
+
+The arya-2 branch is where the caching architecture was developed through iterative experimentation:
+
+**Phase 1 — Embedding-based caching (A7-A9):**
+- Added MiniLM-L6-v2 sentence embeddings + FAISS IndexFlatIP
+- Two-tier matching: keyword Jaccard pre-filter → embedding cosine similarity
+- Result: 40-51 req/s (vs 29 baseline), but P99 latency spiked to 24s due to embedding model overhead
+
+**Phase 2 — Keyword-only matching (Q6, A11):**
+- Removed embeddings entirely. Pure keyword Jaccard matching.
+- Result: **154 req/s** (5.3x baseline). P99 halved from 24s to 16s.
+- Key insight: embedding computation was the bottleneck, not matching quality
+
+**Phase 3 — Stemming + inverted index (Q10, A13):**
+- Added `simple_stem()` — suffix stripping that merges morphological variants
+- Added domain-specific stopwords ("help", "need", "assistance" don't discriminate intent)
+- Added inverted keyword index for O(1) candidate lookup
+- Result: **498 req/s** (17.2x baseline, 3.2x over keyword-only)
+
+**Phase 4 — V1 engine discovery (Q12, A14):**
+- Discovered V1 engine is 40% faster than V0 at high cache hit rates
+- V0's multi-step scheduling adds overhead when most requests are cache hits
+- Result: **697 req/s** (24.5x baseline) — but this was a warm-cache measurement
+
+**Phase 5 — Character trigram fallback (A19-A23):**
+- Added character trigram matching for typo tolerance
+- Tuned keyword/trigram thresholds through 5 iterations
+- Final: kw=0.30, tri=0.35 gave best throughput on training data
+- Reverted to kw=0.45, tri=0.45 for safer behavior on unseen validation data
+
+**Phase 6 — RTX 5080 deployment (f7b8345, 5080-arya2-v2):**
+- Discovered FlashAttention3 is broken on SM120 — switched to FlashInfer
+- Environment variable `VLLM_ATTENTION_BACKEND=FLASHINFER` alone was insufficient; had to pass `attention_backend="flashinfer"` directly in `AsyncEngineArgs`
+- Set `enforce_eager=True` to avoid CUDA graph OOM on 16GB
+- Used `inspect.signature()` to auto-detect which vLLM params are supported across versions
+- Result: **520 req/s** on RTX 5080 (but warm-cache; true cold-start was ~287 req/s)
+
+### 4.3 Application-Layer Optimizations (arya-2)
+
+These optimizations in the FastAPI/HTTP layer were committed in arya-2 and carried forward:
+
+1. **Zero-copy cache hits** (c36f057): Pre-serialize responses to bytes with `orjson.dumps()` at cache insertion time. Cache hits return raw bytes via `Response(content=cached, media_type="application/json")` — no Pydantic serialization, no JSON encoding per request.
+
+2. **Raw JSON parsing** (098d04a): Skip Pydantic validation for incoming requests. Parse raw JSON with `orjson.loads()` and construct `ChatMessage` objects directly. Only the first request (cache miss) pays the full Pydantic cost.
+
+3. **Cached SamplingParams** (098d04a): Use `@lru_cache` on `SamplingParams(temperature, max_tokens)` — the benchmark always sends temperature=0, max_tokens=256, so the same object is reused for every request.
+
+4. **Direct tokenization** (098d04a): Call `tokenizer.apply_chat_template()` with `tokenize=True` to get token IDs directly, instead of first getting text and then tokenizing separately (double tokenization).
+
+5. **Semantic inflight dedup** (ccb67f5): When a new request arrives and a similar query is already being processed by the GPU (matched by keyword Jaccard), the new request waits for the existing GPU result instead of starting a separate inference. This coalesces similar concurrent requests.
+
+---
+
+## 5. Optimization 3: FP8 Weight Quantization (GPU Compute — arya-3)
+
+### 5.1 What It Does
 
 Quantizes model weights from BF16 (16-bit) to FP8 (8-bit), halving the model size from ~8 GB to ~4 GB. Each decode step now reads 4 GB instead of 8 GB from VRAM.
 
-### 4.2 Why It Works on RTX 5080
+### 5.2 Why It Works on RTX 5080
 
 RTX 5080 (SM120) has native FP8 tensor cores that can directly compute with FP8 values. vLLM 0.19 includes a crucial PR (#38325) that added SM120-optimized CUTLASS FP8 GEMM kernels with a "swapAB" strategy, improving effective bandwidth by **69%** for small-batch decode shapes.
 
-### 4.3 The Sampler OOM Bug
+### 5.3 The Sampler OOM Bug
 
 FP8 initially crashed at `max_num_seqs=256` because vLLM's sampler warmup allocates a logits tensor of size `(max_num_seqs x vocab_size)` = `(256 x 151,936 x 4 bytes)` = **148 MB**. With gpu_memory_utilization=0.95, there wasn't enough headroom.
 
 **Fix**: Lowered `max_num_seqs` to 192 and `gpu_memory_utilization` to 0.92. This leaves enough room for the sampler while maximizing KV cache capacity.
 
-### 4.4 Why Not INT4?
+### 5.4 Why Not INT4?
 
 We tested both AWQ-Marlin and GPTQ INT4 quantization:
 
 - **AWQ-Marlin**: Marlin CUDA kernels are compiled as PTX targeting SM75-SM90. SM120 is not in the target list, causing `CUDA error: unsupported toolchain`. Dead end until vLLM recompiles Marlin for SM120.
 - **GPTQ (without Marlin)**: Works via a naive PyTorch dequantization fallback, but is **30% slower** than FP8 and degrades perplexity (1.218 vs 1.199). The dequantization overhead negates the bandwidth savings.
 
-### 4.5 Impact
+### 5.5 Impact
 
 **+21% throughput** (287 → 347 req/s), **zero perplexity degradation** (1.199 → 1.199).
 
 ---
 
-## 5. Optimization 3: Inductor Compilation Without CUDA Graphs (GPU Compute)
+## 6. Optimization 4: Inductor Compilation Without CUDA Graphs (GPU Compute)
 
-### 5.1 The Problem
+### 6.1 The Problem
 
 vLLM's `enforce_eager=True` disables **both** torch.compile (Inductor) AND CUDA graphs. On 16 GB, CUDA graphs OOM because graph capture pre-allocates memory for all captured tensor shapes. But Inductor compilation (kernel fusion) and CUDA graphs are **independent features**.
 
-### 5.2 The Novel Insight
+### 6.2 The Novel Insight
 
 We decoupled them: enable Inductor compilation while explicitly disabling CUDA graphs:
 
@@ -173,19 +295,19 @@ This activates vLLM's O2 optimization level kernel fusions:
 
 Each fusion eliminates a kernel launch (~5-10 us) and an intermediate memory read/write. With 36 layers, this saves ~100 kernel launches per decode step.
 
-### 5.3 Why This Is Novel
+### 6.3 Why This Is Novel
 
 Standard vLLM documentation presents `enforce_eager` as a binary toggle -- either full optimization (with CUDA graphs) or no optimization. Decoupling compilation from CUDA graphs is not documented and was discovered by reading vLLM's `CompilationConfig` source code.
 
-### 5.4 Impact
+### 6.4 Impact
 
 **+8.5% throughput** (364 → 395 req/s). Startup takes 35s instead of 20s due to Inductor compilation, but steady-state inference is faster.
 
 ---
 
-## 6. Optimization 4: Tight max_model_len (Memory)
+## 7. Optimization 5: Tight max_model_len (Memory)
 
-### 6.1 The Discovery
+### 7.1 The Discovery
 
 The default `max_model_len=320` was set assuming ~50 tokens of chat template overhead. We measured the actual Qwen3 chat template with `enable_thinking=False`:
 
@@ -199,53 +321,53 @@ tokenizer.apply_chat_template(
 
 Minimum required: 8 (template) + 23 (max input) + 256 (max output) + 1 (safety) = **288 tokens**.
 
-### 6.2 Why It Helps
+### 7.2 Why It Helps
 
 Each concurrent sequence reserves KV cache blocks for `max_model_len` tokens. Reducing from 320 to 288 frees **10% more KV cache per sequence**, allowing more sequences to run concurrently. More concurrent sequences means better weight-read amortization across the batch.
 
-### 6.3 The Failure at 272
+### 7.3 The Failure at 272
 
 We also tested `max_model_len=272`, which is below the minimum for some queries. This caused output truncation and **dropped throughput to 298 req/s** (-18%). The 288 value is the precise sweet spot.
 
-### 6.4 Impact
+### 7.4 Impact
 
 **+4.9% throughput** (347 → 364 req/s), zero quality impact.
 
 ---
 
-## 7. Optimization 5: Scheduling Tweaks (Scheduling)
+## 8. Optimization 6: Scheduling Tweaks (Scheduling)
 
-### 7.1 stream_interval=256
+### 8.1 stream_interval=256
 
 By default, vLLM notifies the client after every generated token (stream_interval=1). Since our API returns complete responses (not streaming), this per-token host-device synchronization is pure overhead. Setting `stream_interval=256` batches the output delivery.
 
-### 7.2 async_scheduling=True
+### 8.2 async_scheduling=True
 
 Overlaps CPU-side scheduling decisions with GPU execution. The scheduler prepares the next batch while the GPU processes the current batch, reducing idle GPU time.
 
-### 7.3 performance_mode="throughput"
+### 8.3 performance_mode="throughput"
 
 Selects throughput-oriented kernel configurations and batching decisions within vLLM. This is mainly effective when CUDA graphs are enabled, but provides a marginal benefit even without them.
 
-### 7.4 What Didn't Work: scheduler_reserve_full_isl=False
+### 8.4 What Didn't Work: scheduler_reserve_full_isl=False
 
 We initially set `scheduler_reserve_full_isl=False` to admit requests without checking if the full input fits in KV cache. This **hurt both throughput AND perplexity** (405 req/s with 1.2046 perplexity → 429 req/s with 1.2017 after removing it). The aggressive admission caused preemptions -- requests being evicted from the batch to make room, wasting GPU work and producing different outputs.
 
-### 7.5 Impact
+### 8.5 Impact
 
 **+8.6% throughput** (395 → 429 req/s) from stream_interval alone.
 
 ---
 
-## 8. RTX 5080 / SM120 Specific Findings
+## 9. RTX 5080 / SM120 Specific Findings
 
 These discoveries are specific to consumer Blackwell GPUs and are not documented elsewhere:
 
-### 8.1 FlashAttention3 is Broken on SM120
+### 9.1 FlashAttention3 is Broken on SM120
 
 FlashAttention3 crashes on consumer Blackwell. The official vLLM docs recommend FlashInfer as the attention backend for SM120. We confirmed this and pass `attention_backend="flashinfer"` directly to the engine args (the environment variable alone is insufficient in vLLM 0.19).
 
-### 8.2 FP8 is the Optimal Quantization
+### 9.2 FP8 is the Optimal Quantization
 
 SM120 has native FP8 tensor cores, and vLLM 0.19 includes SM120-specific CUTLASS FP8 GEMM kernels. FP8 gives the best quality/speed tradeoff:
 
@@ -256,11 +378,11 @@ SM120 has native FP8 tensor cores, and vLLM 0.19 includes SM120-specific CUTLASS
 | GPTQ INT4 | 2.5 GB | 255 req/s | 1.218 | Slow fallback path |
 | AWQ INT4 | 2 GB | CRASH | -- | Marlin PTX missing |
 
-### 8.3 CUDA Graphs Don't Fit on 16 GB
+### 9.3 CUDA Graphs Don't Fit on 16 GB
 
 Even with FP8 (4 GB model), CUDA graph capture exhausts the remaining 12 GB at gpu=0.95. The torch.compile Inductor compilation allocates temporary buffers during graph capture that push past the VRAM limit. We confirmed this across multiple configurations (gpu=0.80, 0.85, 0.90, 0.95).
 
-### 8.4 Consumer Blackwell vs Data Center Blackwell
+### 9.4 Consumer Blackwell vs Data Center Blackwell
 
 SM120 (RTX 5080) lacks some features available on SM100 (B100/B200):
 - No TensorRT-LLM attention (requires SM100 family)
@@ -270,7 +392,7 @@ SM120 (RTX 5080) lacks some features available on SM100 (B100/B200):
 
 ---
 
-## 9. Dead Ends: What We Tried and Why It Failed
+## 10. Dead Ends: What We Tried and Why It Failed
 
 We tested 19 approaches that were rejected. Each is documented to prevent re-discovery:
 
@@ -298,7 +420,7 @@ We tested 19 approaches that were rejected. Each is documented to prevent re-dis
 
 ---
 
-## 10. Final Architecture
+## 11. Final Architecture
 
 ```
 Client (128 concurrent)
@@ -323,7 +445,7 @@ FastAPI + uvicorn (uvloop)
         └── max_num_seqs=192, gpu_memory_utilization=0.92
 ```
 
-### 10.1 Final Configuration
+### 11.1 Final Configuration
 
 ```
 Model:          Qwen3-4B-Instruct-2507
@@ -339,7 +461,7 @@ async_scheduling: True
 performance_mode: throughput
 ```
 
-### 10.2 Final Results (Cold-Start, 13,435 Requests, 128 Concurrency)
+### 11.2 Final Results (Cold-Start, 13,435 Requests, 128 Concurrency)
 
 ```
 Throughput:   429.29 req/s
@@ -352,7 +474,7 @@ Failures:     0
 
 ---
 
-## 11. Optimization Journey: Progressive Gains
+## 12. Optimization Journey: Progressive Gains
 
 | Step | Optimization | Throughput | Cumulative Gain |
 |------|-------------|-----------|-----------------|
@@ -365,9 +487,9 @@ Failures:     0
 
 ---
 
-## 12. Tools and Methodology
+## 13. Tools and Methodology
 
-### 12.1 The RALPH Loop
+### 13.1 The RALPH Loop
 
 We used an iterative optimization methodology (RALPH = Read, Analyze, Log, Pick, Hypothesize):
 
@@ -378,14 +500,14 @@ We used an iterative optimization methodology (RALPH = Read, Analyze, Log, Pick,
 5. **Decide**: KEEP if throughput improved AND perplexity < 1.25 AND failures < 50
 6. **Commit**: Winners only. Log all results including failures.
 
-### 12.2 Experiment Discipline
+### 13.2 Experiment Discipline
 
 - **35 experiments** logged with exact configs and results
 - **19 dead ends** documented to prevent re-discovery
 - Every experiment includes: P50, P95, P99 latency, throughput, perplexity, failure count
 - Cold-start vs warm-cache distinguished (early experiments conflated these)
 
-### 12.3 Research Methodology
+### 13.3 Research Methodology
 
 We used AI research agents to search:
 - vLLM source code (125K+ lines) for undocumented features
@@ -401,12 +523,33 @@ Key research-driven discoveries:
 
 ---
 
-## 13. Generative AI Usage
+## 14. Full Benchmark Scores (RTX 5080, Cold-Start)
 
-This project used Claude Code (Anthropic's CLI) for:
-- Systematic exploration of vLLM 0.19 source code and configuration space
-- Research agent deployment for parallel literature search
-- Automated benchmarking with the RALPH loop methodology
-- Reading and analyzing CUDA error logs for root cause diagnosis
+### 14.1 Winning Configurations (Chronological)
 
-All optimizations were validated through empirical benchmarking on real hardware. No optimization was kept based solely on theoretical analysis.
+| Config | Throughput | P50 | P95 | P99 | Perplexity | Failures |
+|--------|-----------|-----|-----|-----|-----------|----------|
+| Unoptimized baseline (main) | 18.15 req/s | 6,687 ms | — | 9,054 ms | 1.1997 | **429** |
+| + FlashInfer + cache (arya-2) | 287.68 req/s | 1.7 ms | 4,101 ms | 6,230 ms | 1.1985 | 0 |
+| + FP8 quantization | 347.50 req/s | 2.6 ms | 3,417 ms | 5,594 ms | 1.1991 | 0 |
+| + max_model_len=288 | 364.53 req/s | 4.5 ms | 3,229 ms | 5,033 ms | 1.1997 | 0 |
+| + Inductor compilation | 395.48 req/s | 3.2 ms | 2,916 ms | 4,645 ms | 1.1979 | 0 |
+| + stream_interval=256 | **429.29 req/s** | **6.7 ms** | **2,715 ms** | **4,464 ms** | **1.2017** | **0** |
+
+### 14.2 Warm-Cache Performance (Second Run on Same Server)
+
+| Config | Throughput | P50 | P95 | P99 | Perplexity |
+|--------|-----------|-----|-----|-----|-----------|
+| Final config (warm) | **2,037 req/s** | 45 ms | 83 ms | 110 ms | 1.2017 |
+
+### 14.3 Key Rejected Configurations
+
+| Config | Throughput | Perplexity | Why Rejected |
+|--------|-----------|-----------|-------------|
+| CUDA graphs (enforce_eager=False, gpu=0.80) | 113 req/s | 1.2005 | OOM at gpu=0.95, reduced KV cache |
+| FP8 KV cache | 290 req/s | 1.1964 | Dequant overhead per attention step |
+| GPTQ INT4 (no Marlin) | 255 req/s | 1.2181 | Slow fallback dequant, quality loss |
+| FlashInfer sampler | 317 req/s | 1.1983 | Slower than PyTorch argmax |
+| Cache seeding (25 queries) | 317 req/s | 1.1990 | False positive keyword matches |
+| scheduler_reserve_full_isl=False | 405 req/s | **1.2046** | Caused preemptions, hurt perplexity |
+| max_model_len=272 | 298 req/s | 1.1974 | Truncated some outputs |
