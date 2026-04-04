@@ -1,7 +1,7 @@
 import os
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
-MAX_MODEL_LENGTH = int(os.getenv("MAX_MODEL_LENGTH", "320"))
+MAX_MODEL_LENGTH = int(os.getenv("MAX_MODEL_LENGTH", "288"))
 GPU_MEMORY_UTILIZATION = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.92"))
 QUANTIZATION = os.getenv("QUANTIZATION", "fp8") or None
 KV_CACHE_DTYPE = os.getenv("KV_CACHE_DTYPE", "auto")

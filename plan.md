@@ -150,6 +150,8 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 | 5080-B22 | 2026-04-03 | FULL: cache seeding (25 queries) | 2.4 | 3678 | 317.33 | 1.1990 | -8.6%, false positive hits |
 | 5080-B23 | 2026-04-03 | FULL: FP8 seqs=128 | 4.0 | 3496 | 337.52 | 1.2005 | seqs=192 better (more batching) |
 | 5080-B24 | 2026-04-03 | enable_dbo=True | — | — | CRASH | — | requires DeepEP (EP only) |
+| 5080-B25 | 2026-04-04 | FP8 seqs=256 gpu=0.90 | 2.5 | 3474 | 336.73 | 1.1971 | seqs=192/gpu=0.92 still better |
+| 5080-B26 | 2026-04-04 | FP8 max_model_len=288 (was 320) | **4.5** | **3229** | **364.53** | 1.1997 | **+4.9%! tighter seq len = more KV** |
 
 ## Discoveries & Surprises
 
@@ -164,6 +166,7 @@ Maximize throughput and minimize P50/P95 latency for Qwen3-4B-Instruct-2507 at 1
 - **FlashInfer doesn't support custom block_size** — must use default
 - **Prefix caching is neutral** — prefill is negligible for 12-token inputs
 - **TF32 matmul precision is neutral** — model is BF16, not FP32; TF32 tensor cores don't apply
+- **Qwen3 chat template overhead is only 8 tokens** (not 50!) — max_model_len can be reduced from 320 to 288 safely (8 template + 23 max input + 256 output + 1 safety = 288). Frees 10% KV cache per sequence.
 - **FLASH_ATTN is BROKEN on SM120** — must use FLASHINFER. Env var alone insufficient in vLLM 0.19.0 — must pass `attention_backend="flashinfer"` directly to AsyncEngineArgs
 - **vLLM version compatibility** — swap_space, num_scheduler_steps, speculative_config don't exist in 0.19.0. Code now auto-detects supported params via inspect
 - **CRITICAL: Grading uses VALIDATION data (unseen queries)** — cache only helps for duplicates/similar queries within the validation set, not training data
