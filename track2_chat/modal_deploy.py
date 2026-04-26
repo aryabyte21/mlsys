@@ -1,12 +1,3 @@
-"""Deploy chat-engine on Modal with a GPU.
-
-Usage (run from track2_chat/ directory):
-    cd track2_chat
-    modal run modal_deploy.py::download_model    # download model (one-time)
-    modal deploy modal_deploy.py                 # deploy server
-    modal serve modal_deploy.py                  # dev mode (hot reload)
-"""
-
 import modal
 
 app = modal.App("chat-engine")
@@ -34,12 +25,11 @@ model_volume = modal.Volume.from_name("hf-model-cache", create_if_missing=True)
     timeout=600,
 )
 def download_model():
-    """Pre-download model weights into the persistent volume."""
     from huggingface_hub import snapshot_download
 
     snapshot_download(MODEL_NAME)
     model_volume.commit()
-    print(f"Model {MODEL_NAME} downloaded successfully!")
+    print(f"Model {MODEL_NAME} downloaded")
 
 
 @app.function(
@@ -52,7 +42,6 @@ def download_model():
 @modal.concurrent(max_inputs=150)
 @modal.asgi_app()
 def serve():
-    """Serve the chat-engine FastAPI app on an L4 GPU."""
     import logging
     import os
     import sys
@@ -60,7 +49,6 @@ def serve():
     logging.basicConfig(level=logging.INFO)
     sys.path.insert(0, "/root")
 
-    # L4 GPU config — no FP8, no spec decode (L4 safe baseline)
     os.environ["QUANTIZATION"] = ""
     os.environ["KV_CACHE_DTYPE"] = ""
     os.environ["GPU_MEMORY_UTILIZATION"] = "0.90"

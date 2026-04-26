@@ -1,13 +1,9 @@
 import re
 
-# Compile regex once at module load
 _NON_ALNUM = re.compile(r"[^a-z0-9\s]")
 _MULTI_SPACE = re.compile(r"\s+")
 
-# Extended stopwords: English + domain-specific customer service filler words
-# Domain words like "help", "need", "assistance" don't discriminate intent
 _STOP_WORDS = frozenset({
-    # Standard English stopwords (subset of sklearn's ENGLISH_STOP_WORDS)
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
     "and", "any", "are", "as", "at", "be", "because", "been", "before",
     "being", "below", "between", "both", "but", "by", "can", "co", "could",
@@ -24,7 +20,6 @@ _STOP_WORDS = frozenset({
     "ve", "very", "was", "we", "were", "what", "when", "where", "which",
     "while", "who", "whom", "why", "will", "with", "would", "you", "your",
     "yours", "yourself", "yourselves",
-    # Domain-specific: customer service filler (don't discriminate intent)
     "need", "want", "help", "please", "like", "got", "know",
     "im", "ive", "dont", "tell", "let", "ur", "damn", "bloody", "freaking",
     "assist", "assistance", "gonna", "gotta", "wanna",
@@ -39,12 +34,6 @@ def normalize_text(text: str) -> str:
 
 
 def simple_stem(word: str) -> str:
-    """Fast suffix stripping — merges morphological variants.
-
-    cancel/cancelling/canceling → cancel
-    orders/ordered → order
-    payments → pay
-    """
     if len(word) <= 3:
         return word
     if word.endswith("lling") and len(word) > 6:

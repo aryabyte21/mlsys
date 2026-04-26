@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=64)
 def _get_sampling_params(temperature: float, max_tokens: int) -> SamplingParams:
-    """Cache SamplingParams — benchmark always sends the same values."""
     return SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
@@ -44,7 +43,7 @@ class ChatEngine:
         self.engine = None
         self.tokenizer = None
         self.is_ready = False
-        self._supports_thinking = None  # cache template capability
+        self._supports_thinking = None
         self._chat_template_kwargs = None
         self._request_counter = count(1)
 
@@ -71,7 +70,6 @@ class ChatEngine:
             ENABLE_CHUNKED_PREFILL, speculative_config,
         )
 
-        # Build engine args — only include params supported by installed vLLM
         import inspect
         valid_params = set(inspect.signature(AsyncEngineArgs.__init__).parameters)
 
@@ -92,23 +90,18 @@ class ChatEngine:
             enforce_eager=ENFORCE_EAGER,
         )
 
-        # Inductor compilation without CUDA graphs: enables kernel fusions
-        # (fuse_norm_quant, fuse_act_quant, fuse_rope_kvcache) that reduce
-        # per-layer kernel launch count from ~15 to ~8, saving ~0.5ms/step.
-        # CUDA graphs are disabled (cudagraph_mode=none) to avoid OOM on 16GB.
         if not ENFORCE_EAGER:
             try:
                 from vllm.config import CompilationConfig
                 cudagraph = os.getenv("CUDAGRAPH_MODE", "none")
                 kwargs["compilation_config"] = CompilationConfig(
-                    mode=3,  # VLLM_COMPILE mode
+                    mode=3,
                     cudagraph_mode=cudagraph,
                 )
                 logger.info("Inductor compilation enabled (no CUDA graphs)")
             except Exception:
                 logger.info("CompilationConfig not available, using defaults")
 
-        # Optional params that differ across vLLM versions
         optional = {
             "attention_backend": "flashinfer",
             "swap_space": SWAP_SPACE,
@@ -116,8 +109,7 @@ class ChatEngine:
             "speculative_config": speculative_config,
             "performance_mode": os.getenv("PERFORMANCE_MODE", "throughput"),
             "async_scheduling": True,
-            "stream_interval": 256,  # Disable per-token streaming (batch output)
-            # scheduler_reserve_full_isl=False removed — hurts perplexity via preemptions
+            "stream_interval": 256,
         }
         for key, val in optional.items():
             if key in valid_params:
@@ -126,13 +118,11 @@ class ChatEngine:
         engine_args = AsyncEngineArgs(**kwargs)
 
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-        # Handle both sync (vLLM 0.8.x) and async (vLLM 0.9.x) get_tokenizer
         tokenizer = self.engine.get_tokenizer()
         if hasattr(tokenizer, '__await__'):
             tokenizer = await tokenizer
         self.tokenizer = tokenizer
 
-        # Probe once whether the tokenizer supports enable_thinking
         try:
             self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": "test"}],
@@ -152,17 +142,15 @@ class ChatEngine:
             self._chat_template_kwargs["enable_thinking"] = False
 
         self.is_ready = True
-        logger.info("Engine initialization complete!")
+        logger.info("Engine initialization complete")
 
     async def generate(self, request: ChatRequest) -> dict:
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        # Tokenize directly to token IDs — skip double tokenization
         token_ids = self.tokenizer.apply_chat_template(
             messages, **self._chat_template_kwargs
         )
 
-        # Reuse cached SamplingParams
         sampling_params = _get_sampling_params(request.temperature, request.max_tokens)
 
         final_output = None
@@ -181,11 +169,12 @@ class ChatEngine:
         if output_data.logprobs is None:
             raise RuntimeError("logprobs are missing from vLLM output")
 
-        # Build response dict directly — skip Pydantic construction
         logprobs = []
         append_logprob = logprobs.append
         for token_id, step in zip(output_data.token_ids, output_data.logprobs):
             token_logprob = step.get(token_id)
-            append_logprob(token_logprob.logprob if token_logprob is not None else 0.0)
+            if token_logprob is None:
+                raise RuntimeError("missing logprob for sampled token")
+            append_logprob(token_logprob.logprob)
 
         return {"output": output_data.text, "logprobs": logprobs}

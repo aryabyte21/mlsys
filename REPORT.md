@@ -85,14 +85,14 @@ Instead of running GPU inference for every request, we cache responses and retur
 ```
 Input: "How do I cancel my order?"
 
-Step 1 — Normalize:    "how do i cancel my order"
-Step 2 — Remove stops:  ["cancel", "order"]       (removed: how, do, i, my)
-Step 3 — Stem:          ["cancel", "order"]        (cancel→cancel, order→order)
-Step 4 — Lookup:        inverted_index["cancel"] → {key1, key5, key9}
+Step 1: Normalize:    "how do i cancel my order"
+Step 2: Remove stops:  ["cancel", "order"]       (removed: how, do, i, my)
+Step 3: Stem:          ["cancel", "order"]        (cancel→cancel, order→order)
+Step 4: Lookup:        inverted_index["cancel"] → {key1, key5, key9}
                         inverted_index["order"]  → {key1, key3, key9}
                         candidates = {key1, key5, key9, key3}
-Step 5 — Jaccard:       score(key1) = |{cancel,order} ∩ cached_keywords| / |union|
-Step 6 — Threshold:     if score >= 0.45 → return cached response
+Step 5: Jaccard:       score(key1) = |{cancel,order} ∩ cached_keywords| / |union|
+Step 6: Threshold:     if score >= 0.45 → return cached response
 ```
 
 ### 3.3 Why Simple Stemming, Not Embeddings
@@ -126,7 +126,7 @@ The cache has **three thresholds** that control the quality/speed tradeoff. Thes
 
 **What happens when you turn them:**
 
-- **Lower thresholds (e.g., kw=0.30, hard=0.55)**: More cache hits, higher throughput on training data. But returns wrong answers for genuinely different queries — "cancel order" might match "track order" since both share "order". We tested kw=0.30 and saw **+52% throughput but perplexity degraded** (A21: 1.2037 vs 1.1945). On unseen validation data, this risk is amplified.
+- **Lower thresholds (e.g., kw=0.30, hard=0.55)**: More cache hits, higher throughput on training data. But returns wrong answers for genuinely different queries: "cancel order" might match "track order" since both share "order". We tested kw=0.30 and saw **+52% throughput but perplexity degraded** (A21: 1.2037 vs 1.1945). On unseen validation data, this risk is amplified.
 
 - **Higher thresholds (e.g., kw=0.65, hard=0.85)**: Fewer false positives, better perplexity. But cache hit rate drops, forcing more GPU inference. We tested kw=0.65 initially (A7) and got only 40 req/s.
 
@@ -147,7 +147,7 @@ The cache has **three thresholds** that control the quality/speed tradeoff. Thes
 
 **Advantages:**
 
-1. **Zero external dependencies**: Pure Python — no ML models, no FAISS, no sentence-transformers. Faster Docker builds, smaller image, no version conflicts.
+1. **Zero external dependencies**: Pure Python: no ML models, no FAISS, no sentence-transformers. Faster Docker builds, smaller image, no version conflicts.
 2. **Deterministic and interpretable**: You can inspect exactly why two queries matched (shared keywords). Neural embeddings are black boxes.
 3. **O(1) candidate lookup**: The inverted index makes lookup time independent of cache size. Neural approaches require O(n) similarity search or approximate nearest neighbor structures.
 4. **No GPU contention**: The cache runs entirely on CPU. Embedding models would compete with the LLM for GPU memory and compute.
@@ -163,7 +163,7 @@ The cache has **three thresholds** that control the quality/speed tradeoff. Thes
 
 **Why it's the best approach for THIS specific benchmark:**
 
-1. **Temperature=0 (deterministic)**: Every query with the same content produces the identical response. This makes caching safe — there's no randomness.
+1. **Temperature=0 (deterministic)**: Every query with the same content produces the identical response. This makes caching safe: there's no randomness.
 2. **Short queries (12 tokens avg)**: With so few words, keyword overlap is a strong signal. Longer queries would dilute the Jaccard scores.
 3. **Customer service domain**: ~17 distinct intents with clear keyword patterns (cancel, refund, track, delivery, payment, account, etc.). Keywords naturally cluster by intent.
 4. **High duplicate rate**: 36% exact duplicates in training data, plus paraphrases. The cache is effective even with conservative thresholds.
@@ -184,7 +184,7 @@ Before the arya-3 GPU-level optimizations, significant work was done on the arya
 The project started on the arya branch with the professor's starter template. Initial work focused on understanding the system:
 
 - **Benchmarked on Modal L4 GPU**: 13.33 req/s baseline (P50=9.8s, perplexity=1.20)
-- **Benchmarked on H200 (141GB VRAM)**: FP8, BF16, AWQ all gave ~28-29 req/s — confirming the system is **bandwidth-bound**, not compute-bound
+- **Benchmarked on H200 (141GB VRAM)**: FP8, BF16, AWQ all gave ~28-29 req/s: confirming the system is **bandwidth-bound**, not compute-bound
 - **Added inflight request deduplication**: Coalesced identical concurrent requests to share GPU results
 - **Optimized FastAPI path**: Skipped Pydantic validation, direct tokenization, cached SamplingParams, orjson serialization
 
@@ -192,35 +192,35 @@ The project started on the arya branch with the professor's starter template. In
 
 The arya-2 branch is where the caching architecture was developed through iterative experimentation:
 
-**Phase 1 — Embedding-based caching (A7-A9):**
+**Phase 1: Embedding-based caching (A7-A9):**
 - Added MiniLM-L6-v2 sentence embeddings + FAISS IndexFlatIP
 - Two-tier matching: keyword Jaccard pre-filter → embedding cosine similarity
 - Result: 40-51 req/s (vs 29 baseline), but P99 latency spiked to 24s due to embedding model overhead
 
-**Phase 2 — Keyword-only matching (Q6, A11):**
+**Phase 2: Keyword-only matching (Q6, A11):**
 - Removed embeddings entirely. Pure keyword Jaccard matching.
 - Result: **154 req/s** (5.3x baseline). P99 halved from 24s to 16s.
 - Key insight: embedding computation was the bottleneck, not matching quality
 
-**Phase 3 — Stemming + inverted index (Q10, A13):**
-- Added `simple_stem()` — suffix stripping that merges morphological variants
+**Phase 3: Stemming + inverted index (Q10, A13):**
+- Added `simple_stem()`: suffix stripping that merges morphological variants
 - Added domain-specific stopwords ("help", "need", "assistance" don't discriminate intent)
 - Added inverted keyword index for O(1) candidate lookup
 - Result: **498 req/s** (17.2x baseline, 3.2x over keyword-only)
 
-**Phase 4 — V1 engine discovery (Q12, A14):**
+**Phase 4: V1 engine discovery (Q12, A14):**
 - Discovered V1 engine is 40% faster than V0 at high cache hit rates
 - V0's multi-step scheduling adds overhead when most requests are cache hits
-- Result: **697 req/s** (24.5x baseline) — but this was a warm-cache measurement
+- Result: **697 req/s** (24.5x baseline): but this was a warm-cache measurement
 
-**Phase 5 — Character trigram fallback (A19-A23):**
+**Phase 5: Character trigram fallback (A19-A23):**
 - Added character trigram matching for typo tolerance
 - Tuned keyword/trigram thresholds through 5 iterations
 - Final: kw=0.30, tri=0.35 gave best throughput on training data
 - Reverted to kw=0.45, tri=0.45 for safer behavior on unseen validation data
 
-**Phase 6 — RTX 5080 deployment (f7b8345, 5080-arya2-v2):**
-- Discovered FlashAttention3 is broken on SM120 — switched to FlashInfer
+**Phase 6: RTX 5080 deployment (f7b8345, 5080-arya2-v2):**
+- Discovered FlashAttention3 is broken on SM120: switched to FlashInfer
 - Environment variable `VLLM_ATTENTION_BACKEND=FLASHINFER` alone was insufficient; had to pass `attention_backend="flashinfer"` directly in `AsyncEngineArgs`
 - Set `enforce_eager=True` to avoid CUDA graph OOM on 16GB
 - Used `inspect.signature()` to auto-detect which vLLM params are supported across versions
@@ -230,11 +230,11 @@ The arya-2 branch is where the caching architecture was developed through iterat
 
 These optimizations in the FastAPI/HTTP layer were committed in arya-2 and carried forward:
 
-1. **Zero-copy cache hits** (c36f057): Pre-serialize responses to bytes with `orjson.dumps()` at cache insertion time. Cache hits return raw bytes via `Response(content=cached, media_type="application/json")` — no Pydantic serialization, no JSON encoding per request.
+1. **Zero-copy cache hits** (c36f057): Pre-serialize responses to bytes with `orjson.dumps()` at cache insertion time. Cache hits return raw bytes via `Response(content=cached, media_type="application/json")`: no Pydantic serialization, no JSON encoding per request.
 
 2. **Raw JSON parsing** (098d04a): Skip Pydantic validation for incoming requests. Parse raw JSON with `orjson.loads()` and construct `ChatMessage` objects directly. Only the first request (cache miss) pays the full Pydantic cost.
 
-3. **Cached SamplingParams** (098d04a): Use `@lru_cache` on `SamplingParams(temperature, max_tokens)` — the benchmark always sends temperature=0, max_tokens=256, so the same object is reused for every request.
+3. **Cached SamplingParams** (098d04a): Use `@lru_cache` on `SamplingParams(temperature, max_tokens)`: the benchmark always sends temperature=0, max_tokens=256, so the same object is reused for every request.
 
 4. **Direct tokenization** (098d04a): Call `tokenizer.apply_chat_template()` with `tokenize=True` to get token IDs directly, instead of first getting text and then tokenizing separately (double tokenization).
 
@@ -242,7 +242,7 @@ These optimizations in the FastAPI/HTTP layer were committed in arya-2 and carri
 
 ---
 
-## 5. Optimization 3: FP8 Weight Quantization (GPU Compute — arya-3)
+## 5. Optimization 3: FP8 Weight Quantization (GPU Compute: arya-3)
 
 ### 5.1 What It Does
 
@@ -262,30 +262,30 @@ FP8 initially crashed at `max_num_seqs=256` because vLLM's sampler warmup alloca
 
 INT4 quantization would theoretically double our throughput (2GB model → 2.1ms per decode step). We tested it exhaustively across 3 checkpoint formats and 2 quantization backends:
 
-**Attempt 1 — AWQ `compressed-tensors` format** (cyankiwi, warshanks models):
+**Attempt 1: AWQ `compressed-tensors` format** (cyankiwi, warshanks models):
 - These HuggingFace models are labeled "AWQ" but use `quant_method: compressed-tensors` (quantized by llm-compressor, not AutoAWQ)
 - vLLM routes compressed-tensors through Marlin kernels regardless
 - **Crash**: `CUDA error: the provided PTX was compiled with an unsupported toolchain`
 - Root cause: Marlin PTX binary targets SM75-SM90 only
 
-**Attempt 2 — AWQ native format** (`Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`):
+**Attempt 2: AWQ native format** (`Eslzzyl/Qwen3-4B-Instruct-2507-AWQ`):
 - Correct format: `quant_method: awq`, `bits: 4`, `group_size: 128`, `zero_point: true`
 - vLLM auto-detects AWQ and selects `awq_marlin` kernel (verified via `check_marlin_supported()` returning True for SM120)
 - **Same crash**: `marlin_permute_scales()` fails because the Marlin CUDA kernel PTX is not compiled for SM120
 - The API-level check (`check_marlin_supported`) passes, but the actual kernel binary doesn't support SM120
 
-**Attempt 3 — GPTQ INT4 without Marlin** (`JunHowie/Qwen3-4B-Instruct-2507-GPTQ-Int4`):
+**Attempt 3: GPTQ INT4 without Marlin** (`JunHowie/Qwen3-4B-Instruct-2507-GPTQ-Int4`):
 - GPTQ requires `dtype=float16` (not BF16)
 - With Marlin disabled, falls back to naive PyTorch dequantization
 - **Works but is 40% slower**: 255 req/s vs 429 req/s (FP8)
 - **Perplexity degrades**: 1.218 vs 1.202
 - The dequantization overhead on every matmul negates the bandwidth savings
 
-**Attempt 4 — AWQ with Triton backend** (`VLLM_USE_TRITON_AWQ=1`):
+**Attempt 4: AWQ with Triton backend** (`VLLM_USE_TRITON_AWQ=1`):
 - Discovered an env var that forces a **Triton-based AWQ kernel** instead of Marlin
-- Triton JIT-compiles kernels at runtime for the current GPU — **works on SM120!**
+- Triton JIT-compiles kernels at runtime for the current GPU: **works on SM120!**
 - Server starts successfully in 50s (Triton compilation overhead)
-- **Result: 250 req/s** — **40% slower than FP8** (429 req/s)
+- **Result: 250 req/s**: **40% slower than FP8** (429 req/s)
 - The Triton dequantization kernel is generic and does not use SM120's tensor cores efficiently
 - Perplexity: 1.206 (acceptable but worse than FP8's 1.202)
 
@@ -522,17 +522,6 @@ All numbers are **full 13K cold-start benchmarks** on RTX 5080 at 128 concurrenc
 
 ## 13. Tools and Methodology
 
-### 13.1 The RALPH Loop
-
-We used an iterative optimization methodology (RALPH = Read, Analyze, Log, Pick, Hypothesize):
-
-1. **Orient**: Read plan.md, check GPU state
-2. **Pick ONE optimization**: Highest-priority untried idea
-3. **Implement**: Minimal, reversible changes
-4. **Benchmark**: Quick (3K requests) for screening, Full (13K) for confirmation
-5. **Decide**: KEEP if throughput improved AND perplexity < 1.25 AND failures < 50
-6. **Commit**: Winners only. Log all results including failures.
-
 ### 13.2 Experiment Discipline
 
 - **35 experiments** logged with exact configs and results
@@ -558,13 +547,13 @@ Key research-driven discoveries:
 
 ## 14. Full Benchmark Scores (RTX 5080, Cold-Start)
 
-> **Important**: All scores below (except the unoptimized baseline and warm-cache row) are from **full cold-start benchmarks**: 13,435 requests at 128 concurrency using `data/track2/train.jsonl`. "Cold-start" means the server was freshly started with an empty cache — no prior queries. This is the realistic scenario for grading, where validation data is unseen.
+> **Important**: All scores below (except the unoptimized baseline and warm-cache row) are from **full cold-start benchmarks**: 13,435 requests at 128 concurrency using `data/track2/train.jsonl`. "Cold-start" means the server was freshly started with an empty cache: no prior queries. This is the realistic scenario for grading, where validation data is unseen.
 
 ### 14.1 Winning Configurations (Chronological, All Full 13K Cold-Start)
 
 | # | Config | Throughput | P50 | P95 | P99 | Perplexity | Failures | Benchmark |
 |---|--------|-----------|-----|-----|-----|-----------|----------|-----------|
-| 0 | Unoptimized baseline (main) | 18.15 req/s | 6,687 ms | — | 9,054 ms | 1.1997 | **429** | Full 13K |
+| 0 | Unoptimized baseline (main) | 18.15 req/s | 6,687 ms |: | 9,054 ms | 1.1997 | **429** | Full 13K |
 | 1 | + FlashInfer + cache (arya-2) | 287.68 req/s | 1.7 ms | 4,101 ms | 6,230 ms | 1.1985 | 0 | Full 13K cold |
 | 2 | + FP8 quantization | 347.50 req/s | 2.6 ms | 3,417 ms | 5,594 ms | 1.1991 | 0 | Full 13K cold |
 | 3 | + max_model_len=288 | 364.53 req/s | 4.5 ms | 3,229 ms | 5,033 ms | 1.1997 | 0 | Full 13K cold |
